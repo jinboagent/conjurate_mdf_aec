@@ -1,0 +1,1 @@
+from comparison.framework import compare_algorithms
