@@ -73,7 +73,7 @@ class FrequencyDomainFilter(ABC):
     Base class for frequency-domain filters.
 
     Use this when your algorithm operates on pre-transformed
-    frequency-domain signals (e.g., RLS Bisheng MDF).
+    frequency-domain signals (e.g., Conjugate Gradient MDF).
     """
 
     @abstractmethod

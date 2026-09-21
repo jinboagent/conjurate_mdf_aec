@@ -1,8 +1,8 @@
 """
-Visualization of RLS Bisheng MDF Weight Convergence Process
+Visualization of Conjugate Gradient MDF Weight Convergence Process
 
 This script generates detailed visualizations showing how the filter weights
-converge during the RLS adaptation process.
+converge during the conjugate gradient adaptation process.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def stft_analysis(sig, n_fft=256, hop_length=64):
 
 def visualize_weight_convergence():
     """
-    Visualize weight convergence during RLS adaptation
+    Visualize weight convergence during conjugate gradient adaptation
     """
     print("=" * 70)
     print("RLS Bisheng MDF - Weight Convergence Visualization")
@@ -59,7 +59,7 @@ def visualize_weight_convergence():
     
     print(f"STFT: {n_frames} frames, {nbin} bins, N_G={N_G}")
     
-    # Create RLS filter
+    # Create CG-MDF filter
     rls = RLSBishengMDF(
         NCHAN=1, NBIN=nbin, N_G=N_G,
         N_cnt_loud=1, N_wait=10,
@@ -69,9 +69,9 @@ def visualize_weight_convergence():
     
     # Track convergence
     weight_history = []      # Weight magnitude per frame
-    ratio_history = []       # rcross/Rtoe ratio
+    ratio_history = []       # rcross/autoR ratio
     output_power_history = []  # Output power
-    rtoe_history = []        # Rtoe magnitude
+    autor_history = []        # autoR magnitude
     rcross_history = []      # rcross magnitude
     tap_distribution = []    # Weight distribution across taps
     
@@ -89,10 +89,10 @@ def visualize_weight_convergence():
         weight_history.append(w_mag_per_tap.copy())
         
         # Track ratio
-        rtoe_val = np.mean(np.abs(rls.Rtoe[0]))
+        autor_val = np.mean(np.abs(rls.autoR[0]))
         rcross_val = np.mean(np.abs(rls.rcross[0][:, :, 0]))
-        ratio_history.append(rcross_val / rtoe_val if rtoe_val > 1e-10 else 0)
-        rtoe_history.append(rtoe_val)
+        ratio_history.append(rcross_val / autor_val if autor_val > 1e-10 else 0)
+        autor_history.append(autor_val)
         rcross_history.append(rcross_val)
         
         # Track output power
@@ -176,7 +176,7 @@ def visualize_weight_convergence():
         ax3.legend(loc='upper right', fontsize=8)
     
     # -------------------------------------------------------------------------
-    # Plot 4: rcross/Rtoe ratio convergence
+    # Plot 4: rcross/autoR ratio convergence
     # -------------------------------------------------------------------------
     ax4 = fig.add_subplot(gs[1, 0])
     ax4.plot(frame_axis, ratio_history, linewidth=2, color='purple')
@@ -184,18 +184,18 @@ def visualize_weight_convergence():
     ax4.axhline(y=0.9, color='orange', linestyle='--', alpha=0.5)
     ax4.axhline(y=1.1, color='orange', linestyle='--', alpha=0.5)
     ax4.set_xlabel('Frame')
-    ax4.set_ylabel('rcross/Rtoe Ratio')
-    ax4.set_title('Echo Path Identification\n(rcross/Rtoe → 1.0 for identical signals)')
+    ax4.set_ylabel('rcross/autoR Ratio')
+    ax4.set_title('Echo Path Identification\n(rcross/autoR → 1.0 for identical signals)')
     ax4.legend(loc='lower right', fontsize=8)
     ax4.grid(True, alpha=0.3)
     ax4.set_xlim(0, n_frames)
     ax4.set_ylim(0, 1.5)
     
     # -------------------------------------------------------------------------
-    # Plot 5: Rtoe and rcross magnitude
+    # Plot 5: autoR and rcross magnitude
     # -------------------------------------------------------------------------
     ax5 = fig.add_subplot(gs[1, 1])
-    ax5.plot(frame_axis, rtoe_history, label='|Rtoe|', linewidth=1.5, color='blue')
+    ax5.plot(frame_axis, autor_history, label='|autoR|', linewidth=1.5, color='blue')
     ax5.plot(frame_axis, rcross_history, label='|rcross|', linewidth=1.5, color='red')
     ax5.set_xlabel('Frame')
     ax5.set_ylabel('Magnitude')
@@ -430,7 +430,7 @@ def visualize_known_delay_convergence():
     X_mic = stft_analysis(mic_signal, n_fft, hop_length)
     n_frames = X_ref.shape[1]
     
-    # Create RLS filter
+    # Create CG-MDF filter
     rls = RLSBishengMDF(
         NCHAN=1, NBIN=nbin, N_G=N_G,
         N_cnt_loud=1, N_wait=10,

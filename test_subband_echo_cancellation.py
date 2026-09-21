@@ -1,5 +1,5 @@
 """
-Block-based Echo Cancellation using Time-Domain NLMS and Frequency-Domain RLS Bisheng MDF
+Block-based Echo Cancellation using Time-Domain NLMS and Frequency-Domain Conjugate Gradient MDF
 
 This implementation properly handles the echo cancellation scenario where:
 - Reference signal (x): Original speech from loudspeaker
@@ -21,7 +21,7 @@ System Parameters:
 
 Supported Algorithms:
 - NLMS: Normalized Least Mean Squares (time-domain, simpler)
-- RLS: RLS Bisheng MDF (frequency-domain multi-delay filter bank)
+- RLS: Conjugate Gradient MDF, selected via the 'rls' CLI key (frequency-domain multi-delay filter bank)
 """
 
 import numpy as np
@@ -34,22 +34,22 @@ from tqdm import tqdm
 import sys
 import os
 
-# Add parent directory to path to import RLS Bisheng MDF
+# Add parent directory to path to import Conjugate Gradient MDF
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rls_bisheng_mdf import RLSBishengMDF, RLS_PARAMS_BALANCED
 
 
 class BlockRLSBishengMDF:
-    """Block-based frequency-domain RLS Bisheng MDF adaptive filter
+    """Block-based frequency-domain Conjugate Gradient MDF adaptive filter
 
-    This implementation properly interfaces with the RLS Bisheng MDF algorithm.
-    The RLS filter maintains its own internal state for the multi-delay filter bank.
-    We process sample-by-sample through the RLS filter in the frequency domain.
+    This implementation properly interfaces with the Conjugate Gradient MDF algorithm.
+    The CG-MDF filter maintains its own internal state for the multi-delay filter bank.
+    We process sample-by-sample through the CG-MDF filter in the frequency domain.
     """
 
     def __init__(self, filter_length, sr, mu=0.03, overlap=0.75, fft_size=512, n_g=64):
         """
-        Initialize block RLS Bisheng MDF multi-delay filter
+        Initialize block Conjugate Gradient MDF multi-delay filter
 
         Parameters:
             filter_length: Filter length in samples (echo path to cover)
@@ -100,11 +100,11 @@ class BlockRLSBishengMDF:
 
     def process_block(self, x_block, d_block):
         """
-        Process a block of samples using RLS Bisheng MDF multi-delay filter.
+        Process a block of samples using Conjugate Gradient MDF multi-delay filter.
 
         Uses overlap-save: fft_size input samples produce step_size valid output samples.
-        The RLS filter maintains its own internal multi-delay buffer — this wrapper
-        simply converts between time-domain frames and frequency-domain RLS.
+        The CG-MDF filter maintains its own internal multi-delay buffer — this wrapper
+        simply converts between time-domain frames and frequency-domain operation.
 
         Parameters:
             x_block: Reference signal block (fft_size samples)
@@ -117,11 +117,11 @@ class BlockRLSBishengMDF:
         X = np.fft.rfft(x_block)
         D = np.fft.rfft(d_block)
 
-        # Reshape for RLS filter (nbin, 1)
+        # Reshape for CG-MDF filter (nbin, 1)
         X = X.reshape(-1, 1)
         D = D.reshape(-1, 1)
 
-        # Apply RLS echo cancellation
+        # Apply CG-MDF echo cancellation
         E = self.rls_filter.apply(D, X)
 
         # Convert error back to time domain
@@ -292,7 +292,7 @@ def test_echo_cancellation(algorithm='lms'):
         print(f"  - Filter covers: {filter_length/sr*1000:.1f} ms")
 
     elif algorithm.lower() == 'rls':
-        # For RLS Bisheng MDF (FDAF), use N_G=32 delay blocks
+        # For Conjugate Gradient MDF (FDAF), use N_G=32 delay blocks
         # The FDAF is a frequency-domain filter that works on FFT frames
         # Use higher mu since it gets divided by N_G internally
         adaptive_filter = BlockRLSBishengMDF(
@@ -587,7 +587,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         algorithm = sys.argv[1].lower()
     else:
-        # Default: test RLS (more advanced algorithm)
+        # Default: test CG-MDF, selected via the 'rls' key (more advanced algorithm)
         algorithm = 'rls'
 
     # Test specific algorithm

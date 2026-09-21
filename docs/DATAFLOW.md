@@ -11,9 +11,9 @@
 2. [Overlap-Save Block Processing](#2-overlap-save-block-processing)
 3. [Partitioned Buffer Structure](#3-partitioned-buffer-structure)
 4. [PFDAF Data Flow (LMS Baseline)](#4-pfdaf-data-flow-lms-baseline)
-5. [RLS Bisheng MDF Data Flow](#5-rls-bisheng-mdf-data-flow)
+5. [Conjugate Gradient MDF Data Flow](#5-conjugate-gradient-mdf-data-flow)
 6. [Weight Update Strategies](#6-weight-update-strategies)
-7. [The 2M-Point FFT and Modulation](#7-the-2m-point-fft-and-modulation)
+7. [The 2M-Point FFT](#7-the-2m-point-fft)
 8. [Echo Path Generation and Verification](#8-echo-path-generation-and-verification)
 9. [Test Harness Flow](#9-test-harness-flow)
 
@@ -239,8 +239,8 @@ TRUE ECHO PATH h[n] (time domain):
 
 ## 4. PFDAF Data Flow (LMS Baseline)
 
-`pfdaf.py` — the simplest partitioned-block algorithm. Good reference for
-understanding the structure before tackling RLS.
+`pfadf_mdf_cg.py` — the simplest partitioned-block algorithm in this project. Good reference for
+understanding the structure before tackling the CG-MDF filter.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -306,14 +306,14 @@ Total:                       O((4 + 2N) × M log M)
 
 ---
 
-## 5. RLS Bisheng MDF Data Flow
+## 5. Conjugate Gradient MDF Data Flow
 
-`rls_bisheng_mdf.py` — frequency-domain RLS with Toeplitz matrix adaptation.
+`conjugate_mdf.py` — frequency-domain conjugate gradient with Toeplitz matrix adaptation.
 Works on pre-transformed frequency-domain inputs (no internal overlap-save).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  RLS Bisheng MDF apply(Y, Y_rx) — COMPLETE FRAME PROCESSING                │
+│  Conjugate Gradient MDF apply(Y, Y_rx) — COMPLETE FRAME PROCESSING         │
 │                                                                             │
 │  INPUT: Y [NBIN, NCHAN] (mic), Y_rx [NBIN, Nrxref] (reference)           │
 │         (already in frequency domain from external FFT)                     │
@@ -348,23 +348,23 @@ Works on pre-transformed frequency-domain inputs (no internal overlap-save).
 │                                                                             │
 │  For each reference channel iref:                                           │
 │    new_R1 = rx_flipped * conj(Y_rx)         # autocorrelation contribution │
-│    Rtoe[iref] += α * new_R1                  # accumulate                   │
+│    autoR[iref] += α * new_R1                 # accumulate                   │
 │                                                                             │
 │    new_cross = rx_flipped * conj(Y)          # cross-correlation           │
 │    rcross[iref] += α * new_cross             # accumulate                  │
 │                                                                             │
-│    Rtoe[iref] *= β                           # forgetting factor            │
+│    autoR[iref] *= β                          # forgetting factor            │
 │    rcross[iref] *= β                         # forgetting factor            │
 │                                                                             │
-│  Rtoe[k,p]  ≈ Σ_n β^(N-n) * X[n] * conj(X[n-p])   (autocorrelation)      │
+│  autoR[k,p] ≈ Σ_n β^(N-n) * X[n] * conj(X[n-p])   (autocorrelation)      │
 │  rcross[k,p] ≈ Σ_n β^(N-n) * X[n] * conj(Y[n-p])   (cross-correlation)   │
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
-│  STEP 4: RLS ADAPTATION (per frequency bin, CG solve)                      │
+│  STEP 4: CG ADAPTATION (per frequency bin)                                 │
 │  ═══════════════════════════════════════════════════════════                │
 │                                                                             │
 │  For each frequency bin k:                                                  │
-│    r_vec = Rtoe[k, :]                        # autocorrelation vector      │
+│    r_vec = autoR[k, :]                       # autocorrelation vector      │
 │    T = toeplitz(r_vec)                       # build Toeplitz matrix       │
 │                                                                             │
 │    For each microphone channel:                                             │
@@ -389,12 +389,12 @@ Works on pre-transformed frequency-domain inputs (no internal overlap-save).
 ### Key difference from PFDAF
 
 ```
-              PFDAF (LMS)                    RLS Bisheng MDF
-              ───────────                    ───────────────
+              PFDAF (LMS)                    Conjugate Gradient MDF
+              ───────────                    ──────────────────────
 Input         Time-domain blocks             Frequency-domain frames
               (handles own FFT)              (external FFT)
 
-Adaptation    Normalized gradient:           Toeplitz RLS:
+Adaptation    Normalized gradient:           Toeplitz CG:
               H += μ·conj(X)·E/(|X|²+ε)     w += α·T⁻¹·(rcross - T·w)
 
 Memory        Instantaneous power            Accumulated correlations
@@ -434,11 +434,11 @@ Stability     Always stable                  Needs regularization
   • Simple, stable, but slow convergence
 ```
 
-### Strategy 2: Toeplitz RLS (RLS Bisheng MDF)
+### Strategy 2: Toeplitz CG (Conjugate Gradient MDF)
 
 ```
                     ┌─────────────────────────────────────┐
-                    │  Build Toeplitz matrix T from Rtoe   │
+                    │  Build Toeplitz matrix T from autoR  │
                     │                                      │
                     │  ┌                    ┐              │
                     │  │ R[0]  R[1]  R[2]   │              │
@@ -473,7 +473,7 @@ Stability     Always stable                  Needs regularization
   Characteristics:
   ─────────────────
   • All partitions coupled through T
-  • Uses accumulated statistics (Rtoe, rcross)
+  • Uses accumulated statistics (autoR, rcross)
   • Faster convergence but can be unstable for large N_G
   • Toeplitz structure allows O(N²) solve (vs O(N³) for general matrix)
 ```
@@ -508,7 +508,7 @@ Stability     Always stable                  Needs regularization
 
 ---
 
-## 7. The 2M-Point FFT and Modulation
+## 7. The 2M-Point FFT
 
 ### The Problem: M-point FFT Can't Model Sub-Partition Delays
 
@@ -543,45 +543,6 @@ With 2M-point FFT (512 for M=256):
   FFT size = 2M = 512 → frequency resolution = 2M bins
   Each partition still covers M samples, but the
   2M-point FFT provides phase information WITHIN each partition.
-
-  Delay representation:
-    exp(-j·2π·k·(pM+d)/(2M)) = exp(-j·π·k·p) · exp(-j·2π·k·d/(2M))
-                                ─────────────   ─────────────────────
-                                (-1)^(kp)        sub-partition phase
-                                modulation       (fine delay d)
-```
-
-### The Modulation Matrix (-1)^(kp)
-
-```
-  exp(-j·π·k·p) = (-1)^(k·p)
-
-  k\p    0     1     2     3     4     5
-  ─────────────────────────────────────────
-   0   [+1]  [+1]  [+1]  [+1]  [+1]  [+1]    ← DC: no modulation
-   1   [+1]  [-1]  [+1]  [-1]  [+1]  [-1]    ← alternates
-   2   [+1]  [+1]  [+1]  [+1]  [+1]  [+1]    ← even k: all +1
-   3   [+1]  [-1]  [+1]  [-1]  [+1]  [-1]    ← odd k: alternates
-   4   [+1]  [+1]  [+1]  [+1]  [+1]  [+1]
-   5   [+1]  [-1]  [+1]  [-1]  [+1]  [-1]
-   ...
-
-  Pattern: even k → all +1; odd k → alternates ±1
-
-  WHERE IT MUST BE APPLIED:
-  ┌─────────────────────────────────────────────────────────────┐
-  │  1. FILTERING:                                               │
-  │     Y[k] = Σ_p H[k,p] · X_buf[k,p] · (-1)^(kp)             │
-  │                                                              │
-  │  2. WEIGHT UPDATE:                                           │
-  │     ΔH[k,p] = μ · conj(X[k,p]) · E[k] · (-1)^(kp) / X²    │
-  │                                                              │
-  │  3. CORRELATION (RLS):                                       │
-  │     Rtoe[k,p-q] involves (-1)^(k(p-q))                      │
-  │                                                              │
-  │  If modulation is missing in ANY of these, the algorithm    │
-  │  has a basis mismatch and will converge to wrong solution.   │
-  └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -592,7 +553,7 @@ With 2M-point FFT (512 for M=256):
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  echo_path_generator.py → generate_time_domain_echo_path()               │
+│  test_subband_echo_cancellation.py → create_echo() / LibriSpeech sample   │
 │                                                                          │
 │  RoomParameters:                                                         │
 │    sampling_rate  = 16000 Hz                                            │
@@ -642,7 +603,7 @@ With 2M-point FFT (512 for M=256):
 │                                                                          │
 │  ┌─────────────┐   ┌──────────────┐   ┌────────────────────┐            │
 │  │ true_path   │   │ ref (speech) │   │ adaptive filter    │            │
-│  │ (8000 samp) │   │ (160k samp)  │   │ (PFDAF or RLS)     │            │
+│  │ (8000 samp) │   │ (160k samp)  │   │ (PFDAF or CG-MDF)  │            │
 │  └──────┬──────┘   └──────┬───────┘   └─────────┬──────────┘            │
 │         │                 │                      │                       │
 │         │    ┌────────────▼───────────┐          │                       │
@@ -769,7 +730,6 @@ With 2M-point FFT (512 for M=256):
   │  │  │  │  sub-partition delays        │        │      │       │
   │  │  │  │                              │        │      │       │
   │  │  │  │  FIX: Use 2M-point FFT       │        │      │       │
-  │  │  │  │  + modulation (-1)^(kp)      │        │      │       │
   │  │  │  └──────────────────────────────┘        │      │       │
   │  │  └──────────────────────────────────────────┘      │       │
   │  └─────────────────────────────────────────────────────┘       │
@@ -785,10 +745,7 @@ With 2M-point FFT (512 for M=256):
 
 | File | Algorithm | See Section |
 |------|-----------|-------------|
-| `pfdaf.py` | PFDAF (LMS) | [§4](#4-pfdaf-data-flow-lms-baseline) |
-| `pfdaf_cg.py` | PFDKF-CG | [§6 Strategy 3](#6-weight-update-strategies) |
-| `rls_bisheng_mdf.py` | RLS Bisheng MDF | [§5](#5-rls-bisheng-mdf-data-flow) |
-| `pfadf_nlms.py` | PFADF-NLMS | [§4](#4-pfdaf-data-flow-lms-baseline) (same structure) |
-| `fdaf.py` | FDAF (single block) | [§4](#4-pfdaf-data-flow-lms-baseline) (N=1 case) |
-| `fdkf.py` | FDKF (Kalman) | [§6](#6-weight-update-strategies) |
+| `pfadf_mdf_cg.py` | PFADF MDF CG | [§4](#4-pfdaf-data-flow-lms-baseline) |
+| `conjugate_mdf.py` | Conjugate Gradient MDF | [§5](#5-conjugate-gradient-mdf-data-flow) |
+| `pfdaf_cg.py` | PFDAF-CG | [§6 Strategy 3](#6-weight-update-strategies) |
 | `test_subband_echo_cancellation.py` | Block wrapper | [§9](#9-test-harness-flow) |

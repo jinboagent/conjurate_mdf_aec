@@ -8,15 +8,13 @@ A collection of frequency-domain adaptive filtering algorithms for **Acoustic Ec
 
 | Algorithm | File | Adaptation | Use Case |
 |-----------|------|------------|----------|
-| **PFDAF** | `pfdaf.py` | LMS (NLMS) | Baseline partitioned-block |
-| **PFDAF-CG** | `pfdaf_cg.py` | Conjugate Gradient | Fast convergence |
-| **PFADF-NLMS** | `pfadf_nlms.py` | NLMS | Stable baseline |
-| **RLS Bisheng MDF** | `rls_bisheng_mdf.py` | RLS (Toeplitz) | Toeplitz-matrix RLS |
 | **PFADF MDF CG** | `pfadf_mdf_cg.py` | Normalized gradient | Stable + sub-partition delay resolution |
+| **Conjugate Gradient MDF** | `conjugate_mdf.py` | Conjugate Gradient (Toeplitz) | Toeplitz-matrix CG solve |
+| **PFDAF-CG** | `pfdaf_cg.py` | Conjugate Gradient | Fast convergence |
 
 ## Architecture
 
-All algorithms use **2M-point FFTs with overlap-save** for sub-partition delay resolution. The modulation factor `(-1)^(k*p)` is applied per-partition to encode delay in the frequency domain.
+All algorithms use **2M-point FFTs with overlap-save** for sub-partition delay resolution.
 
 ```
 Reference (x) ──→ [Loudspeaker] ──→ [Room h] ──→ [Mic] ──→ d
@@ -50,9 +48,9 @@ See [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) for full architecture det
 | ERLE | **23.77 dB** |
 | Signal-proportional ε ERLE | **~70 dB** (ε = mean(e²)/mean(x²)) |
 
-### Fair Comparison: RLS Bisheng MDF vs PFADF MDF CG (both 2M-point FFT)
+### Fair Comparison: Conjugate Gradient MDF vs PFADF MDF CG (both 2M-point FFT)
 
-| Metric | RLS Bisheng MDF | PFADF MDF CG |
+| Metric | Conjugate Gradient MDF | PFADF MDF CG |
 |--------|----------------|--------------|
 | ERLE | **3.21 dB** | 0.59 dB |
 | Delay error | 16 ms | **0 ms** |
@@ -119,7 +117,7 @@ See [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) for the full methodology.
 
 - [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) — Algorithm family tree, design decisions, common pitfalls
 - [DATAFLOW.md](DATAFLOW.md) — Visual signal flow diagrams, buffer structures, algorithm internals
-- [RLS_DEBUG_PROCESS.md](RLS_DEBUG_PROCESS.md) — Complete RLS Bisheng MDF debug journey (5 phases, 10+ bugs fixed)
+- [RLS_DEBUG_PROCESS.md](docs/RLS_DEBUG_PROCESS.md) — Complete Conjugate Gradient MDF debug journey (5 phases, 10+ bugs fixed)
 - [REGULARIZATION_RESEARCH.md](REGULARIZATION_RESEARCH.md) — Deep dive on regularization factor ε (theory, literature, experiments)
 - [ECHO_PATH_COMPARISON.md](ECHO_PATH_COMPARISON.md) — Echo path comparison methodology and metrics
 - [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) — 5-layer harness framework for AI-assisted algorithm development
@@ -128,7 +126,7 @@ See [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) for the full methodology.
 
 | Script | Purpose |
 |--------|---------|
-| `test_subband_echo_cancellation.py` | End-to-end NLMS vs RLS echo cancellation |
+| `test_subband_echo_cancellation.py` | End-to-end NLMS vs CG-MDF echo cancellation |
 | `test_echo_path_comparison.py` | Echo path estimation verification |
 | `visualize_weight_convergence.py` | Weight convergence visualization suite |
 | `create_test_files.py` | Generate test audio from LibriSpeech samples |
@@ -136,7 +134,7 @@ See [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) for the full methodology.
 ## Key Design Decisions
 
 1. **2M-point FFT (not M-point)**: Required for sub-partition delay resolution. M-point FFTs can only model delays at exact multiples of M.
-2. **Normalized gradient over Toeplitz RLS**: Theoretically inferior but practically stable. Toeplitz-based RLS with modulation creates ill-conditioned systems that single CG steps can't solve.
+2. **Normalized gradient over Toeplitz CG**: Theoretically inferior but practically stable. Toeplitz-based CG creates ill-conditioned systems that single CG steps can't solve.
 3. **Signal-proportional regularization**: ε = mean(e²)/mean(x²) outperforms fixed ε by 20-40 dB on identity tests.
 4. **Two-level verification**: Signal-level ERLE and model-level echo path metrics catch different classes of bugs.
 

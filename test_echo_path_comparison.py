@@ -56,16 +56,16 @@ def extract_echo_path_from_rls(
     nchan: int = 1
 ) -> np.ndarray:
     """
-    Extract echo path estimate from RLS Bisheng MDF filter weights.
+    Extract echo path estimate from Conjugate Gradient MDF filter weights.
     
     The echo path can be estimated from:
     1. The weight matrix w (frequency-domain filter coefficients)
-    2. The ratio rcross/Rtoe (echo path frequency response)
+    2. The ratio rcross/autoR (echo path frequency response)
     
     Parameters
     ----------
     rls_filter : RLSBishengMDF
-        Trained RLS filter instance
+        Trained CG-MDF filter instance
     nbin : int
         Number of frequency bins
     n_g : int
@@ -114,7 +114,7 @@ def extract_echo_path_from_rls(
 
 def test_rls_echo_path_estimation():
     """
-    Test echo path estimation using RLS Bisheng MDF.
+    Test echo path estimation using Conjugate Gradient MDF.
     """
     from rls_bisheng_mdf import RLSBishengMDF
     
@@ -149,7 +149,7 @@ def test_rls_echo_path_estimation():
     print(f"  Reference: {len(ref_signal)} samples")
     print(f"  Echo: {len(echo_signal)} samples")
     
-    # Initialize RLS filter
+    # Initialize CG-MDF filter
     nbin = 257  # 512-point FFT
     n_g = 64    # Delay blocks
     
@@ -181,7 +181,7 @@ def test_rls_echo_path_estimation():
         X = np.fft.rfft(x_block).reshape(-1, 1)
         D = np.fft.rfft(d_block).reshape(-1, 1)
         
-        # Apply RLS
+        # Apply CG-MDF
         rls_filter.apply(D, X)
         
         if (i + 1) % 100 == 0:
@@ -249,7 +249,7 @@ if __name__ == "__main__":
     print("\n[Test 1] Known Echo Path Validation")
     test_known_echo_path()
     
-    # Test 2: RLS echo path estimation
+    # Test 2: CG-MDF echo path estimation
     print("\n[Test 2] RLS Echo Path Estimation")
     test_rls_echo_path_estimation()
     

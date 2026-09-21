@@ -371,10 +371,7 @@ for p in range(self.N):
 
 | File | ε value | Strategy |
 |---|---|---|
-| `pfdaf.py` | `X2 + 1e-10` | Fixed, tiny (under-regularized) |
-| `fdaf.py` | `norm + 1e-3`, init `1e-8` | Fixed, moderate |
 | `pfdaf_cg.py` | `U + 0.5` | Fixed, large (over-regularized) |
-| `pfadf_nlms.py` | `X2 + 1e-10` | Fixed, tiny |
 | **`pfadf_mdf_cg.py`** | **`X2 + ε_opt`** | **Signal-proportional (optimal)** |
 
 ### 7.3 Experimental Results

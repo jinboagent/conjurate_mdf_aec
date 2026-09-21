@@ -1,13 +1,13 @@
 """
 Partitioned Block Frequency-Domain Adaptive Filter with Multi-Delay Filter (MDF)
-using RLS (Recursive Least Squares) adaptation.
+using Conjugate Gradient (CG-MDF) adaptation.
 
-This module implements the RLS MDF algorithm inline, following the pfdaf.py style
+This module implements the Conjugate Gradient MDF algorithm inline, following the partitioned-block FDAF style
 with filt()/update() interface for compatibility with the adaptive filter test harness.
 
 The algorithm combines:
 - Partitioned block frequency-domain filtering (like PFDAF)
-- RLS adaptation via Toeplitz matrix solve with conjugate gradient step
+- CG-MDF adaptation via Toeplitz matrix solve with conjugate gradient step
 - Time-domain constraint for causality enforcement
 
 References:
@@ -18,13 +18,12 @@ References:
 
 import numpy as np
 from numpy.fft import rfft, irfft
-from scipy.linalg import toeplitz
 
 
 class PFADFMDFCG:
     """
     Partitioned Block Frequency-Domain Adaptive Filter with Multi-Delay Filter
-    using RLS adaptation.
+    using Conjugate Gradient (CG-MDF) adaptation.
 
     Parameters
     ----------
@@ -35,7 +34,7 @@ class PFADFMDFCG:
     mu : float
         Step size / learning rate (alpha)
     beta : float
-        Forgetting factor for RLS (default: 0.97)
+        Forgetting factor for CG-MDF statistics (default: 0.97)
     partial_constrain : bool
         Apply partial time-domain constraint (default: True)
 
@@ -64,19 +63,12 @@ class PFADFMDFCG:
         self.X_buf = np.zeros((self.N, self.N_freq), dtype=np.complex128)
         self.H = np.zeros((self.N, self.N_freq), dtype=np.complex128)
 
-        # RLS correlation estimates (initialized to expected FFT power level)
+        # CG-MDF accumulated power estimates (initialized to expected FFT power level)
         # For unit-variance input with 2M-point FFT, expected |X|^2 ~ 2*M
-        self.Rtoa = np.full((self.N, self.N_freq), float(2 * self.M), dtype=np.complex128)
-        self.C = np.zeros((self.N, self.N_freq), dtype=np.complex128)
+        self.Rtoa = np.full((self.N, self.N_freq), float(2 * self.M), dtype=np.float64)
 
         # Stored from filt() for use in update()
         self._D_fft = None
-
-        # Modulation for partition delay: (-1)^(kp)
-        # With 2M-point FFT, delay of pM samples = (-1)^(kp) per bin
-        p_idx = np.arange(self.N).reshape(-1, 1)
-        k_idx = np.arange(self.N_freq).reshape(1, -1)
-        self.modulation = ((-1.0) ** (p_idx * k_idx)).astype(np.complex128)
 
         # Window for time-domain constraint
         self.window = np.hanning(self.M)
@@ -128,7 +120,7 @@ class PFADFMDFCG:
 
     def update(self, e):
         """
-        Update filter coefficients using RLS adaptation.
+        Update filter coefficients using CG-MDF adaptation.
 
         Parameters
         ----------
@@ -143,7 +135,7 @@ class PFADFMDFCG:
         # Per-partition instantaneous power (for normalization)
         X2 = np.sum(np.abs(self.X_buf) ** 2, axis=0)  # [N_freq]
 
-        # Normalized gradient update (PFDAF-style with RLS accumulated power tracking)
+        # Normalized gradient update (PFDAF-style with CG-MDF accumulated power tracking)
         # Also update accumulated power for diagnostics
         for p in range(self.N):
             X_p = self.X_buf[p]
@@ -153,7 +145,7 @@ class PFADFMDFCG:
             for k in range(self.N_freq):
                 self.H[p, k] += self.mu * np.conj(X_p[k]) * E[k] / (X2[k] + 1e-10)
 
-        # Time-domain constraint (matching pfdaf.py: irfft for real impulse response)
+        # Time-domain constraint (standard overlap-save: irfft for real impulse response)
         if self.partial_constrain:
             h = irfft(self.H[self.p])
             h[self.M:] = 0
@@ -191,15 +183,14 @@ class PFADFMDFCG:
         self.d_old = np.zeros(self.M, dtype=np.float64)
         self.X_buf = np.zeros((self.N, self.N_freq), dtype=np.complex128)
         self.H = np.zeros((self.N, self.N_freq), dtype=np.complex128)
-        self.Rtoa = np.full((self.N, self.N_freq), float(2 * self.M), dtype=np.complex128)
-        self.C = np.zeros((self.N, self.N_freq), dtype=np.complex128)
+        self.Rtoa = np.full((self.N, self.N_freq), float(2 * self.M), dtype=np.float64)
         self.p = 0
         self._D_fft = None
 
 
 def pfadf_mdf_cg(x, d, N=64, M=256, mu=0.03, beta=0.97, partial_constrain=True):
     """
-    Partitioned Block Frequency-Domain Adaptive Filter with MDF using RLS.
+    Partitioned Block Frequency-Domain Adaptive Filter with MDF using Conjugate Gradient (CG-MDF).
 
     Functional interface for batch processing of entire signals.
 
@@ -216,7 +207,7 @@ def pfadf_mdf_cg(x, d, N=64, M=256, mu=0.03, beta=0.97, partial_constrain=True):
     mu : float
         Step size / learning rate (default: 0.03)
     beta : float
-        Forgetting factor for RLS (default: 0.97)
+        Forgetting factor for CG-MDF statistics (default: 0.97)
     partial_constrain : bool
         Apply partial time-domain constraint (default: True)
 

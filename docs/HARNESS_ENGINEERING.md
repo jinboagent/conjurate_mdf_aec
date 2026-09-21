@@ -317,13 +317,13 @@ After every debug session, write a markdown report:
 │  Check intermediate values at each stage:                            │
 │    - Buffer contents (are frames stored correctly?)                  │
 │    - FFT output (correct frequency bins?)                            │
-│    - Correlation values (Rtoe, rcross match expected?)               │
+│    - Correlation values (autoR, rcross match expected?)              │
 │    - Weight values (converging to known answer?)                     │
 │    - Filter output (echo estimate correct?)                          │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Step 4: HYPOTHESIZE                                                 │
 │  Form a theory about the bug. Common categories:                     │
-│    - Convention mismatch (FFT size, buffer ordering, modulation)     │
+│    - Convention mismatch (FFT size, buffer ordering)                 │
 │    - Numerical issue (division by zero, overflow, conditioning)      │
 │    - Model limitation (can't represent the true system)              │
 │    - Parameter issue (step size too large/small, wrong beta)         │
@@ -457,13 +457,14 @@ class MyAlgorithm:
 Test: [Algorithm Name] — [What is being tested]
 """
 import numpy as np
-from echo_path_generator import generate_time_domain_echo_path
 from my_algorithm import MyAlgorithm
 from scipy.signal import fftconvolve
 
 # Ground truth
 ref = np.random.randn(160000)  # or load WAV
-true_path = generate_time_domain_echo_path(seed=42)
+# Generate a simple echo path for testing
+true_path = np.zeros(8000)
+true_path[720] = 0.6  # direct path
 mic = fftconvolve(ref, true_path, mode='full')[:len(ref)]
 
 # Algorithm

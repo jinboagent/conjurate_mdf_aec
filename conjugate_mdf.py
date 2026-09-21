@@ -1,55 +1,56 @@
 """
-Optimized Toeplitz Matrix RLS Echo Canceller
+Optimized Toeplitz-Matrix Conjugate Gradient Echo Canceller
 
-Vectorized implementation of the RLS Bisheng MDF (Multi-Delay Filter) echo canceller.
+Vectorized implementation of the Conjugate Gradient MDF (Multi-Delay Filter) echo canceller.
 Each instance handles a single echo canceller configuration.
 For multiple configurations, create multiple instances and select minimum power output.
 
 References:
+    - "Analysis of Conjugate Gradient Algorithms for Adaptive Filtering"
+      (see aec/AnalysisofConjugateGradientAlgorithmsforAdaptiveFiltering.pdf)
     - Valin, J.-M. (2007). "On Adjusting the Learning Rate in Frequency Domain 
       Echo Cancellation With Double-Talk." ICASSP 2007.
     - Sayed, A.H. (2003). "Fundamentals of Adaptive Filtering." Wiley.
 """
 
 import numpy as np
-from scipy.linalg import toeplitz, solve_toeplitz
+from scipy.linalg import toeplitz
 
 
 # Recommended parameter values based on literature and practical AEC implementations
-RLS_PARAMS_CONSERVATIVE = {
+CONJUGATE_MDF_PARAMS_CONSERVATIVE = {
     'alpha': 0.02,   # Learning rate - stable, slower convergence
     'beta': 0.99,    # Forgetting factor - high stability
 }
 
-RLS_PARAMS_BALANCED = {
+CONJUGATE_MDF_PARAMS_BALANCED = {
     'alpha': 0.05,   # Learning rate - recommended starting point
     'beta': 0.97,    # Forgetting factor - balance speed/stability
 }
 
-RLS_PARAMS_AGGRESSIVE = {
+CONJUGATE_MDF_PARAMS_AGGRESSIVE = {
     'alpha': 0.1,    # Learning rate - fast convergence
     'beta': 0.95,    # Forgetting factor - fast tracking
 }
 
 
-class RLSBishengMDF:
+class CONJUGATE_MDF:
     """
-    Optimized RLS Bisheng MDF Echo Canceller for a single configuration.
+    Optimized Conjugate Gradient MDF Echo Canceller for a single configuration.
     
     For multiple filter length configurations, create multiple instances
     and select the output with minimum power.
     """
     
-    __slots__ = ['nchan', 'nbin', 'N_G', 'N_cnt_loud', 'N_wait', 
-                 'thr_loud', 'alpha', 'beta', 'bin_lim', 'Nrxref',
-                 'buf_Y_rx', 'buf_Y', 'Rtoe', 'rcross', 'w', 'w_last',
-                 'cnt_loud', 'rx_loud_flag', 'output', 'e', 
-                 'cntTrig', 'P_X_rx', 'max_N_G']
+    __slots__ = ['nchan', 'nbin', 'N_G',
+                 'alpha', 'beta', 'bin_lim', 'Nrxref',
+                 'buf_Y_rx', 'buf_Y', 'autoR', 'rcross', 'w', 'w_last',
+                 'cntTrig', 'P_X_rx', 'output', 'e', 'max_N_G']
     
     def __init__(self, NCHAN, NBIN, N_G,
                  alpha, beta, bin_lim, Nrxref=1):
         """
-        Initialize the RLS Bisheng MDF echo canceller.
+        Initialize the Conjugate Gradient MDF echo canceller.
         
         Parameters
         ----------
@@ -59,12 +60,6 @@ class RLSBishengMDF:
             Number of frequency bins
         N_G : int
             Filter length for this EC configuration
-        N_cnt_loud : int
-            Cycle counts for loud rx trigger
-        N_wait : int
-            Cycle counts for rx silence trigger
-        thr_loud : float
-            Loudness threshold for rx signal
         alpha : float
             Learning rate parameter
         beta : float
@@ -93,9 +88,9 @@ class RLSBishengMDF:
         self.buf_Y = np.zeros((self.nbin, 1, self.nchan), dtype=complex)
         
         # State arrays
-        # Rtoe: [nbin, N_G] per reference channel
+        # autoR: [nbin, N_G] per reference channel
         # rcross, w: [nbin, N_G, nchan] per reference channel
-        self.Rtoe = [np.full((self.nbin, self.N_G), 1e-4, dtype=complex) 
+        self.autoR = [np.full((self.nbin, self.N_G), 1e-4, dtype=complex)
                      for _ in range(self.Nrxref)]
         self.rcross = [np.zeros((self.nbin, self.N_G, self.nchan), dtype=complex) 
                        for _ in range(self.Nrxref)]
@@ -164,7 +159,7 @@ class RLSBishengMDF:
         # 3. Update accumulated power (for diagnostics)
         # =========================================================================
         # Note: For proper complex correlation:
-        # - Rtoe (autocorrelation): E[X * conj(X)] - should be real for same signal
+        # - autoR (autocorrelation): E[X * conj(X)] - should be real for same signal
         # - rcross (cross-correlation): E[X * conj(Y)] where Y is microphone
         # 
         # The flip accounts for time-reversal in correlation computation
@@ -172,13 +167,13 @@ class RLSBishengMDF:
         rx_buf_flip = np.flip(self.buf_Y_rx, axis=1)  # [nbin, N_G, Nrxref]
 
         for iref in range(self.Nrxref):
-            # Rtoe: autocorrelation of reference
-            # Rtoe[k] = sum_n(rx[n] * conj(rx[n-k]))
+            # autoR: autocorrelation of reference
+            # autoR[k] = sum_n(rx[n] * conj(rx[n-k]))
             # In freq domain: X * conj(X) = |X|^2 (real)
             # Y_rx shape: [nbin, Nrxref], extract column for this ref
             Y_rx_col = Y_rx[:, iref]  # [nbin]
             new_R1 = rx_buf_flip[:, :, iref] * np.conj(Y_rx_col[:, np.newaxis])  # [nbin, N_G]
-            self.Rtoe[iref] += alpha * new_R1
+            self.autoR[iref] += alpha * new_R1
 
             # rcross: cross-correlation between reference and microphone
             # rcross[k] = sum_n(rx[n] * conj(Y[n-k]))
@@ -190,25 +185,25 @@ class RLSBishengMDF:
                 self.rcross[iref][:, :, i_m] += alpha * new_rcross
 
             # Apply forgetting factor
-            self.Rtoe[iref] *= beta
+            self.autoR[iref] *= beta
             self.rcross[iref] *= beta
         
         # =========================================================================
-        # 4. RLS adaptation (per frequency bin)
+        # 4. Conjugate gradient adaptation (per frequency bin)
         # =========================================================================
         # IMPORTANT: For stability with large N_G, we add regularization and clamping
         # =========================================================================
         for iref in range(self.Nrxref):
-            Rtoe = self.Rtoe[iref]
+            autoR = self.autoR[iref]
             rcross = self.rcross[iref]
             w_last = self.w_last[iref]
 
             for ibin in range(nbin):
-                # Build Toeplitz matrix from Rtoe with regularization
-                r_vec = Rtoe[ibin, :]
+                # Build Toeplitz matrix from autoR with regularization
+                r_vec = autoR[ibin, :]
                 
                 # Add diagonal loading for numerical stability
-                # This prevents ill-conditioning when Rtoe values are small
+                # This prevents ill-conditioning when autoR values are small
                 r_vec_reg = r_vec.copy()
                 r_vec_reg[0] += 1e-30  # Diagonal loading
                 

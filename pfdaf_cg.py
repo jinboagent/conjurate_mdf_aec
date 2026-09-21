@@ -78,7 +78,6 @@ class PFDAFCG:
         
         # Statistics
         self.iteration_count = 0
-        self.cg_iterations = []
     
     def filt(self, x, d):
         """
@@ -184,7 +183,7 @@ class PFDAFCG:
         return beta
     
     def conjugate_gradient_update(self, e):
-        """cc
+        """
         Perform conjugate gradient weight update
         
         Parameters
@@ -230,7 +229,6 @@ class PFDAFCG:
         self.H = self.H + np.conj(self.X) * G_norm
         
         self.iteration_count += 1
-        self.cg_iterations.append(self.k_max)
     
     def update_correlation(self):
         """

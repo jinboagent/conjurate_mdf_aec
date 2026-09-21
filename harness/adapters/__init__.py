@@ -14,9 +14,9 @@ class RLSBishengMDFAdapter(AdaptiveFilter):
     """
     Adapter for RLSBishengMDF to implement AdaptiveFilter interface.
     
-    This adapter wraps the RLS Bisheng MDF algorithm to work with
+    This adapter wraps the Conjugate Gradient MDF (CG-MDF) algorithm to work with
     the test harness. It handles the conversion between time-domain
-    blocks (harness standard) and frequency-domain (RLS internal).
+    blocks (harness standard) and frequency-domain (CG-MDF internal).
     
     Parameters
     ----------
@@ -56,7 +56,7 @@ class RLSBishengMDFAdapter(AdaptiveFilter):
         self.nchan = nchan
         self.nbin = fft_size // 2 + 1
         
-        # Initialize RLS filter
+        # Initialize CG-MDF filter
         self.rls_filter = RLSBishengMDF(
             NCHAN=nchan,
             NBIN=self.nbin,
@@ -73,7 +73,7 @@ class RLSBishengMDFAdapter(AdaptiveFilter):
         
     def filt(self, x: np.ndarray, d: np.ndarray) -> np.ndarray:
         """
-        Filter input block using RLS Bisheng MDF.
+        Filter input block using Conjugate Gradient MDF.
         
         Parameters
         ----------
@@ -95,11 +95,11 @@ class RLSBishengMDFAdapter(AdaptiveFilter):
         X = np.fft.rfft(x_now)
         D = np.fft.rfft(d_now)
         
-        # Reshape for RLS: [nbin, 1]
+        # Reshape for CG-MDF: [nbin, 1]
         X = X.reshape(-1, 1)
         D = D.reshape(-1, 1)
         
-        # Apply RLS echo cancellation
+        # Apply CG-MDF echo cancellation
         E = self.rls_filter.apply(D, X)
         
         # Convert to time domain
@@ -118,9 +118,9 @@ class RLSBishengMDFAdapter(AdaptiveFilter):
     
     def update(self, e: np.ndarray) -> None:
         """
-        Update filter coefficients (no-op for RLS).
+        Update filter coefficients (no-op for CG-MDF).
         
-        RLS Bisheng MDF updates weights internally in apply(),
+        The CG-MDF filter updates weights internally in apply(),
         so this method is a no-op for API compatibility.
         """
         pass
@@ -133,9 +133,9 @@ class RLSBishengMDFAdapter(AdaptiveFilter):
 
     def get_echo_path(self) -> np.ndarray:
         """
-        Extract estimated echo path from RLS filter weights.
+        Extract estimated echo path from CG-MDF filter weights.
 
-        The RLS weights are [nbin, N_G, nchan] per reference channel.
+        The CG-MDF weights are [nbin, N_G, nchan] per reference channel.
         For each partition, IFFT across frequency bins gives the
         time-domain impulse response contribution.
 
@@ -261,7 +261,7 @@ def create_standard_rlsmdf_adapter(
     mu: float = 0.03
 ) -> RLSBishengMDFAdapter:
     """
-    Create a standard RLS Bisheng MDF adapter with recommended parameters.
+    Create a standard CG-MDF (RLSBishengMDF) adapter with recommended parameters.
     
     Parameters
     ----------

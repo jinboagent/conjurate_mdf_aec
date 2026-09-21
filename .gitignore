@@ -1,6 +1,7 @@
 # Environment
 .env
 .env.*
+.venv/
 
 # Python
 __pycache__/
@@ -22,8 +23,19 @@ build/
 .DS_Store
 Thumbs.db
 
+# Project run data (audio inputs/outputs and per-run results)
+audio/
+results/
+
 # Jupyter
 .ipynb_checkpoints/
 
 # Qwen agent metadata (session-specific)
 .qwen/
+
+# ZCode agent metadata (session-specific)
+.zcode/
+.zcodeignore
+
+# Claude agent metadata (session-specific)
+.claude/
