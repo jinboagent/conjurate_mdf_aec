@@ -9,3 +9,6 @@ tqdm
 
 # PyTorch (CPU build; no NVIDIA GPU on this machine)
 torch
+
+# TensorFlow (neural_train/ trainable-DSP experiments)
+tensorflow
