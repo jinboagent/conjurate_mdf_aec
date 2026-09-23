@@ -43,12 +43,12 @@ class CONJUGATE_MDF:
     """
     
     __slots__ = ['nchan', 'nbin', 'N_G',
-                 'alpha', 'beta', 'bin_lim', 'Nrxref',
+                 'alpha', 'beta', 'bin_lim', 'Nrxref', 'bin_skip',
                  'buf_Y_rx', 'buf_Y', 'autoR', 'rcross', 'w', 'w_last',
                  'cntTrig', 'P_X_rx', 'output', 'e', 'max_N_G']
-    
+
     def __init__(self, NCHAN, NBIN, N_G,
-                 alpha, beta, bin_lim, Nrxref=1):
+                 alpha, beta, bin_lim, Nrxref=1, bin_skip=0):
         """
         Initialize the Conjugate Gradient MDF echo canceller.
         
@@ -77,6 +77,11 @@ class CONJUGATE_MDF:
         self.beta = float(beta)
         self.bin_lim = int(bin_lim)
         self.Nrxref = Nrxref
+        # Lowest bin_skip bins are frozen at zero weight (no echo estimate,
+        # content passes through): DC / ultra-low bins are normally removed
+        # by a downstream high-pass filter, and their STFT-frame correlation
+        # matrices are the most ill-conditioned. Default 0 = adapt all bins.
+        self.bin_skip = int(bin_skip)
         self.max_N_G = self.N_G
         
         self.reset()
@@ -90,17 +95,27 @@ class CONJUGATE_MDF:
         # State arrays
         # autoR: [nbin, N_G] per reference channel
         # rcross, w: [nbin, N_G, nchan] per reference channel
-        self.autoR = [np.full((self.nbin, self.N_G), 1e-4, dtype=complex)
+        # Zero init for BOTH correlations: they must satisfy the same
+        # relation as the data (for mic=ref, rcross == autoR elementwise,
+        # so w=e1 solves toeplitz(autoR) w = rcross exactly). The old 1e-4
+        # autoR init broke that relation with a phantom bias -1e-4*ones,
+        # whose chase explodes when T goes near-singular during speech
+        # pauses. With zero init, T -> 0 in silence and the |den| guard
+        # self-suspends updates (the MATLAB class needs explicit
+        # thr_loud/cnt_loud scheduling for the same effect).
+        self.autoR = [np.zeros((self.nbin, self.N_G), dtype=complex)
                      for _ in range(self.Nrxref)]
         self.rcross = [np.zeros((self.nbin, self.N_G, self.nchan), dtype=complex) 
                        for _ in range(self.Nrxref)]
         # Initialize weights with small random values for numerical stability
-        self.w = [(np.random.randn(self.nbin, self.N_G, self.nchan) + 
+        self.w = [(np.random.randn(self.nbin, self.N_G, self.nchan) +
                    1j * np.random.randn(self.nbin, self.N_G, self.nchan)) * 1e-6
                   for _ in range(self.Nrxref)]
-        self.w_last = [(np.random.randn(self.nbin, self.N_G, self.nchan) + 
+        self.w_last = [(np.random.randn(self.nbin, self.N_G, self.nchan) +
                         1j * np.random.randn(self.nbin, self.N_G, self.nchan)) * 1e-6
                        for _ in range(self.Nrxref)]
+        for w_ in self.w + self.w_last:
+            w_[:self.bin_skip] = 0.0      # frozen bins: no echo estimate
         
         # Outputs: [nbin, nchan]
         self.output = np.zeros((self.nbin, self.nchan), dtype=complex)
@@ -167,12 +182,21 @@ class CONJUGATE_MDF:
         rx_buf_flip = np.flip(self.buf_Y_rx, axis=1)  # [nbin, N_G, Nrxref]
 
         for iref in range(self.Nrxref):
-            # autoR: autocorrelation of reference
-            # autoR[k] = sum_n(rx[n] * conj(rx[n-k]))
-            # In freq domain: X * conj(X) = |X|^2 (real)
+            # autoR: autocorrelation of reference — conjugate on the regressor:
+            # autoR[k] = E[conj(X(t-k)) * X(t)], same side as rcross.
+            # The class filters y = sum_j w_j X(t-j) (no conj on w), whose normal
+            # equations are toeplitz(autoR) w = rcross with BOTH correlations
+            # conjugated on X. Conjugating only one of them mixes the two
+            # Hermitian conventions and yields w = T^-1 conj(T) w_true
+            # (identity probe 2026-09-23: |w - e1| = 79.5 for the mixed pairing,
+            # ~1e-12 when both match; conjurate_mdf.m inherited the same mix).
+            # In freq domain: conj(X(t-k)) * X(t)
             # Y_rx shape: [nbin, Nrxref], extract column for this ref
             Y_rx_col = Y_rx[:, iref]  # [nbin]
-            new_R1 = rx_buf_flip[:, :, iref] * np.conj(Y_rx_col[:, np.newaxis])  # [nbin, N_G]
+
+            #@ai-instruction  instru there should be a complex value mulitplication
+
+            new_R1 = np.conj(rx_buf_flip[:, :, iref]) * Y_rx_col[:, np.newaxis]  # [nbin, N_G]
             self.autoR[iref] += alpha * new_R1
 
             # rcross: cross-correlation between reference and microphone
@@ -181,7 +205,9 @@ class CONJUGATE_MDF:
             # Y shape: [nbin, nchan], result should be [nbin, N_G, nchan]
             for i_m in range(nchan):
                 Y_col = Y[:, i_m]  # [nbin]
-                new_rcross = rx_buf_flip[:, :, iref] * np.conj(Y_col[:, np.newaxis])  # [nbin, N_G]
+                # conj on the reference (paper Table 2: V^H D; conjurate_mdf.m:210,216)
+                # so rcross accumulates b_m = sum_t conj(X(t-m)) * Y(t)
+                new_rcross = np.conj(rx_buf_flip[:, :, iref]) * Y_col[:, np.newaxis]  # [nbin, N_G]
                 self.rcross[iref][:, :, i_m] += alpha * new_rcross
 
             # Apply forgetting factor
@@ -198,15 +224,18 @@ class CONJUGATE_MDF:
             rcross = self.rcross[iref]
             w_last = self.w_last[iref]
 
-            for ibin in range(nbin):
-                # Build Toeplitz matrix from autoR with regularization
+            for ibin in range(self.bin_skip, nbin):
+                # Build Toeplitz matrix from autoR
+                # NOTE: the 1e-30 term below is nominal only (diagonal values
+                # are orders of magnitude larger) — it does NOT regularize.
+                # Measured (2026-09-23): meaningful relative loading trades
+                # identity-echo ERLE for slightly less negative delayed-echo
+                # ERLE; neither setting reaches useful delayed cancellation.
                 r_vec = autoR[ibin, :]
-                
-                # Add diagonal loading for numerical stability
-                # This prevents ill-conditioning when autoR values are small
+
                 r_vec_reg = r_vec.copy()
-                r_vec_reg[0] += 1e-30  # Diagonal loading
-                
+                r_vec_reg += 1e-30  # nominal diagonal term
+
                 T = toeplitz(r_vec_reg)
 
                 for i_m in range(nchan):
@@ -219,41 +248,50 @@ class CONJUGATE_MDF:
                     # T @ p
                     rp = T @ p
 
-                    # Step size: alf = 0.999 * (p^H @ g0) / (p^H @ rp + eps)
-                    # IMPORTANT: Take REAL part - step size must be real for stability
-                    # p^H @ g0 and p^H @ rp should be real for Hermitian T
-                    num = 0.999 * np.real(np.vdot(p, g0))
-                    den = np.real(np.vdot(p, rp)) + 1e-30  # Increased regularization for large N_G
+                    # Step size — conjurate_mdf.m line 235:
+                    #   alf = 0.999*(conj(p)*(gd_last.')) / ((conj(p)*(rp.')) + 1.0000e-30)
+                    # MATLAB conj(p_row)*(x_row).' == np.vdot(p, x): scalar complex inner
+                    # product. gd_last == g0 here (single step); alf stays complex — no
+                    # real(), no clipping, exactly as in the MATLAB reference.
+                    #alf = 0.999 * np.vdot(p, g0) / (np.vdot(p, rp))
+                    num = 0.999 * np.vdot(p, g0)
+                    den = np.vdot(p, rp)
 
-                    if np.abs(den) > 1e-30:
+                    # Positive-curvature + nonzero-denominator guard:
+                    # - den = p^H T p is real for Hermitian T; a den <= 0
+                    #   (T is a nonstationary windowed estimate and can be
+                    #   slightly indefinite) would step uphill and explode.
+                    # - den ~ 0 happens in silent/near-silent bins where
+                    #   T -> 0 (zero init); skipping there self-suspends the
+                    #   update — the equivalent of conjurate_mdf.m's
+                    #   thr_loud/cnt_loud scheduling, which this port does
+                    #   not carry. The threshold must stay TINY (1e-30, the
+                    #   MATLAB constant): a larger absolute threshold (e.g.
+                    #   1e-10) also skips legitimate low-excitation updates
+                    #   and leaves those bins unconverged (identity probe
+                    #   2026-09-23: den straddles 1e-12..1e-8 in quiet bins;
+                    #   1e-10 guard -> ERLE -14 dB, 1e-30 guard -> 87 dB).
+                    if den.real > 0 and abs(den) > 1e-30:
                         alf = num / den
                     else:
                         alf = 0.0
                     
-                    # CLAMP step size for stability with large N_G
-                    # Prevents weight explosion when denominator is small
-                    alf = np.clip(alf, -1.0, 1.0)
-
                     # Update weight
                     self.w[iref][ibin, :, i_m] = w_last[ibin, :, i_m] + alf * p
                     
-                    # WEIGHT CLAMPING: Prevent individual weights from exploding
-                    # This is a safety mechanism for numerical stability
-                    w_current = self.w[iref][ibin, :, i_m]
-                    max_weight = 10.0  # Reasonable bound for frequency domain weights
-                    if np.any(np.abs(w_current) > max_weight):
-                        w_current = np.clip(w_current, -max_weight, max_weight)
-                        self.w[iref][ibin, :, i_m] = w_current
-
+                    # WEIGHT CLAMPING: prevent individual weights from
+                    #@ai_instruction we dont need to do weight clamping. 
+                    # The only way the weights can explode is cause error explode. 
+                    # So we don't do to do the weight clamping here.
         # =========================================================================
         # 5. Apply filtering with updated weights
         # =========================================================================
         rx_flipped = np.flip(self.buf_Y_rx, axis=1)
-        
+
         micest = np.zeros((nbin, nchan), dtype=complex)
         for iref in range(self.Nrxref):
             micest += np.sum(self.w[iref] * rx_flipped[:, :, iref:iref+1], axis=1)
-        
+
         self.output = Y - micest
         self.e = self.output.copy()
 

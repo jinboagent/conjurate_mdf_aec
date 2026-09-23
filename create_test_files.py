@@ -11,39 +11,47 @@ Both files are:
 - Mono channel
 """
 
+import os
+
 import numpy as np
 import librosa
 import soundfile as sf
 
 
-def create_test_files(output_dir='.', duration=10, delay_ms=50, decay=0.4):
+def create_test_files(output_dir='audio', duration=10, delay_ms=50, decay=0.4,
+                      speech_file=None):
     """
     Create reference and microphone (echo) test files.
-    
-    Parameters
-    ----------
-    output_dir : str
-        Output directory for WAV files
-    duration : float
-        Duration in seconds (default: 10)
-    delay_ms : float
-        Echo delay in milliseconds (default: 50)
-    decay : float
-        Echo attenuation factor (default: 0.4 = -8dB)
+
+    Args:
+        output_dir: output directory (default 'audio'); created if missing
+        duration: duration in seconds
+        delay_ms: echo delay in milliseconds (default 50)
+        decay: echo attenuation factor (default 0.4 = -8 dB)
+        speech_file: optional WAV to use as the far-end speech (default
+            None -> LibriSpeech sample via librosa)
     """
     TARGET_SR = 16000  # 16kHz
-    
-    print(f"Loading LibriSpeech sample from librosa...")
-    
-    # Load built-in LibriSpeech sample
-    y_orig, sr_orig = librosa.load(librosa.ex('libri2'), duration=duration, sr=None)
-    
-    # Resample to 16kHz if needed
-    if sr_orig != TARGET_SR:
-        print(f"Resampling from {sr_orig} Hz to {TARGET_SR} Hz...")
-        y = librosa.resample(y_orig, orig_sr=sr_orig, target_sr=TARGET_SR)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    if speech_file is not None:
+        print(f"Loading speech file: {speech_file}")
+        y_orig, sr_orig = sf.read(speech_file, dtype='float32')
+        if sr_orig != TARGET_SR:
+            print(f"Resampling from {sr_orig} Hz to {TARGET_SR} Hz...")
+            y = librosa.resample(y_orig, orig_sr=sr_orig, target_sr=TARGET_SR)
+        else:
+            y = y_orig
+        y = y[:int(duration * TARGET_SR)]
     else:
-        y = y_orig
+        print(f"Loading LibriSpeech sample from librosa...")
+        y_orig, sr_orig = librosa.load(librosa.ex('libri2'), duration=duration, sr=None)
+        if sr_orig != TARGET_SR:
+            print(f"Resampling from {sr_orig} Hz to {TARGET_SR} Hz...")
+            y = librosa.resample(y_orig, orig_sr=sr_orig, target_sr=TARGET_SR)
+        else:
+            y = y_orig
     
     sr = TARGET_SR
     
@@ -87,7 +95,6 @@ def create_test_files(output_dir='.', duration=10, delay_ms=50, decay=0.4):
     print(f"  - {mic_file} ({len(mic_signal) / sr:.2f}s, {sr}Hz)")
     
     # Print file info
-    import os
     ref_size = os.path.getsize(ref_file) / 1024  # KB
     mic_size = os.path.getsize(mic_file) / 1024  # KB
     
@@ -114,15 +121,26 @@ def create_test_files(output_dir='.', duration=10, delay_ms=50, decay=0.4):
 
 if __name__ == '__main__':
     import sys
-    
-    # Parse command line arguments
-    delay_ms = 0  # Default: zero delay for algorithm verification
-    decay = 1.0   # Default: unity gain for easy verification
-    
+
+    # Defaults: the canonical test pair (50 ms delay, -8 dB echo).
+    # NOTE: the accidental identity pair (delay=0, decay=1) previously
+    # shipped as reference/microphone was created by running this script
+    # bare with the old defaults; the defaults below are the intended ones.
+    delay_ms = 50
+    decay = 0.4
+    speech_file = None
+    duration = 10
+
     if len(sys.argv) > 1:
         delay_ms = float(sys.argv[1])
     if len(sys.argv) > 2:
         decay = float(sys.argv[2])
-    
-    print(f"Creating test files with delay={delay_ms}ms, decay={decay}")
-    create_test_files(delay_ms=delay_ms, decay=decay)
+    if len(sys.argv) > 3:
+        speech_file = sys.argv[3]
+    if len(sys.argv) > 4:
+        duration = float(sys.argv[4])
+
+    print(f"Creating test files with delay={delay_ms}ms, decay={decay}, "
+          f"duration={duration}s")
+    create_test_files(duration=duration, delay_ms=delay_ms, decay=decay,
+                      speech_file=speech_file)

@@ -179,3 +179,71 @@ def generate_test_signals(
     mic = fftconvolve(ref, echo_path, mode='full')[:len(ref)]
 
     return ref, mic
+
+
+def generate_room_echo_signals(
+    params=None,
+    seed: Optional[int] = None,
+    signal_length: int = 160000,
+    sample_rate: int = 16000,
+    speech_file: Optional[str] = None,
+    normalize_rir: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Room-echo test signals via the project's echo_path_generator.py.
+
+    Composes the existing project generators (no new echo model here):
+        echo_path_generator.generate_time_domain_echo_path  -> room RIR
+        generate_test_signals                              -> speech + convolve
+
+    Args:
+        params: echo_path_generator.RoomParameters (defaults: 16 kHz,
+            500 ms filter, 45 ms direct delay, RT60 300 ms office room).
+            See echo_path_examples.py for documented scenarios
+            (office / large conference / small huddle).
+        seed: random seed for the RIR (and the noise fallback of
+            generate_test_signals)
+        signal_length: output length in samples
+        sample_rate: sample rate
+        speech_file: WAV for the far-end reference (None -> white noise)
+        normalize_rir: scale the RIR to unit energy so the echo path
+            gain is <= 1 and the microphone is quieter than the
+            reference (physical echo; default True)
+
+    Returns:
+        (ref, mic, h): clean reference, echo-contaminated microphone
+        signal, and the (possibly normalized) true room impulse response
+    """
+    import os
+    import sys
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from echo_path_generator import (  # project's existing room model
+        RoomParameters,
+        generate_time_domain_echo_path,
+    )
+
+    if params is None:
+        params = RoomParameters()
+    h = generate_time_domain_echo_path(params, seed=seed)
+    if normalize_rir:
+        # physical (passive-room) echo path: total energy <= 1 AND
+        # |H(f)| <= 1 at every frequency, so the microphone can never
+        # carry more power than the reference, whatever the signal
+        energy = np.sum(h ** 2)
+        if energy > 1.0:
+            h = h / np.sqrt(energy)
+        h_max = np.max(np.abs(np.fft.rfft(h)))
+        if h_max > 1.0:
+            h = h / h_max
+    ref, mic = generate_test_signals(
+        h,
+        signal_length=signal_length,
+        sample_rate=sample_rate,
+        speech_file=speech_file,
+        seed=seed if seed is not None else 42,
+    )
+    return ref, mic, h
