@@ -13,7 +13,7 @@
 4. [PFDAF Data Flow (LMS Baseline)](#4-pfdaf-data-flow-lms-baseline)
 5. [Conjugate Gradient MDF Data Flow](#5-conjugate-gradient-mdf-data-flow)
 6. [Weight Update Strategies](#6-weight-update-strategies)
-7. [The 2M-Point FFT](#7-the-2m-point-fft)
+7. [Sub-Hop Delays: Representation vs the Criterion Cliff](#7-sub-hop-delays-representation-vs-the-criterion-cliff)
 8. [Echo Path Generation and Verification](#8-echo-path-generation-and-verification)
 9. [Test Harness Flow](#9-test-harness-flow)
 
@@ -80,67 +80,76 @@
 All partitioned-block algorithms use **overlap-save** to convert between
 time-domain signals and frequency-domain processing.
 
+### The geometry dial: L = R × M (configurable)
+
+Two lengths define every block scheme in this project:
+
+| Symbol | Meaning | Classic choice | This harness (current code) |
+|--------|---------|----------------|------------------------------|
+| `M` | block size = **hop** (frame advance) | 256 | **128** |
+| `L` | frame length = FFT size | `2M` (50% overlap) | **512 = 4M** (75% overlap) |
+| `R = L/M` | overlap factor | 2 | **4** |
+
+The frame length is **any integer multiple of the hop**: `L = R·M`.
+The classic textbook scheme uses `R = 2`; the current harness wrapper
+(`CGMDF(fft_size=512, step=128)` in `test_subband_echo_cancellation.py`)
+runs `R = 4`. Both are just settings of the same two knobs
+(`fft_size`, `step`) — nothing in `CONJUGATE_MDF` itself knows `L` or `M`;
+it only sees pre-transformed frames (§5).
+
+> **Notation note:** this document uses `N_G` for the number of frequency
+> partitions (filter length in frames) and `R` for the overlap factor, so a
+> filter covers `(N_G + R − 2)·M` samples of delay in total (§7).
+
 ```
 TIME DOMAIN                    FREQUENCY DOMAIN              TIME DOMAIN
 ───────────                    ────────────────              ───────────
 
 Input signal x[n]:
 ┌───┬───┬───┬───┬───┬───┐
-│ 0 │ 1 │ 2 │ 3 │ 4 │ 5 │  ... blocks of M samples
+│ 0 │ 1 │ 2 │ 3 │ 4 │ 5 │  ... blocks of M samples (the hop)
 └───┴───┴───┴───┴───┴───┘
 
-Block n=2 processing:
+Frame t (R = 2 shown — the classic scheme):
+
                     ┌───────────────────────┐
-  x_old (block 1)   │   x (block 2)         │
+  x_old (block t-1) │   x (block t)         │
   ┌───────────────┐ │ ┌───────────────┐     │
   │ M samples     │ │ │ M samples     │     │
   └───────┬───────┘ │ └───────┬───────┘     │
-          │         │         │             │
           └────┬────┘         │             │
-               │              │             │
                ▼              │             │
           ┌─────────────────┐ │             │
-          │  2M samples     │◄┘             │
-          │  [x_old | x]    │              │
+          │  L = 2M samples │◄┘             │
+          │  [x_old | x]    │               │
           └────────┬────────┘              │
                    │                        │
                    ▼                        │
-            ┌──────────────┐               │
-            │  2M-pt FFT   │               │
-            │  X = rfft()  │               │
-            │  (M+1 bins)  │               │
-            └──────┬───────┘               │
-                   │                        │
-                   ▼                        │
-            ┌──────────────┐               │
-            │  Filtering   │               │
-            │  Y = H * X   │               │
-            └──────┬───────┘               │
-                   │                        │
-                   ▼                        │
-            ┌──────────────┐               │
-            │  2M-pt IFFT  │               │
-            │  y = irfft() │               │
-            └──────┬───────┘               │
-                   │                        │
-                   ▼                        │
-            ┌──────────────────────┐       │
-            │  Extract last M:     │       │
-            │  y_valid = y[M:]     │       │
-            │  (first M are        │       │
-            │   circular garbage)  │       │
-            └──────────┬───────────┘       │
-                       │                    │
-                       ▼                    │
-                 y_valid (M samples) ──────┘
-
-WHY 2M-point FFT?
-─────────────────
-Linear convolution of M-tap filter with M new samples needs 2M-1 points.
-Using 2M-point FFT gives exact linear convolution via circular convolution.
-The first M output samples contain wrap-around artifacts → discard them.
-The last M samples are the valid linear convolution result.
+            ┌────────────┐                 │
+            │  L-pt FFT  │  → X[k] (L/2+1 bins)
+            └────┬───────┘                 │
+                 ▼                         │
+            Filtering Y = H·X (per bin)    │
+                 ▼                         │
+            ┌────────────┐                 │
+            │  L-pt IFFT │                 │
+            └────┬───────┘                 │
+                 ▼                         │
+      keep the LAST M samples ─────────────┘
+      (the first L−M are circular garbage)
 ```
+
+With `R = 2` the previous block is the whole history in the window; with
+`R = 4` (the harness) the window reaches 3 blocks back — the regressor for
+one weight spans `R` blocks, which is what makes the partition bookkeeping
+in §7 subtle.
+
+WHY an L ≥ 2M-point FFT?
+─────────────────────────
+Linear convolution of an M-tap filter with M new samples needs 2M−1 points.
+With an L-point circular convolution, the first L−M output samples contain
+wrap-around artifacts → discard them; the last M are the valid linear-convolution
+result. Any `R ≥ 2` keeps this property (bigger R only adds overlap).
 
 ### Step-by-step example (M=4, 2M=8)
 
@@ -198,8 +207,13 @@ For long echo paths, a single block isn't enough. We split the filter into
     self.X[1:] = self.X[:-1]     # shift
     self.X[0]  = X               # insert
 
-  Total echo path coverage:
-    N partitions × M samples/partition = N×M samples
+  Total echo path coverage (classic R = 2 geometry):
+  N partitions × M samples/partition = N×M samples
+
+  General L = R·M geometry (§2): consecutive lag frames are offset by M,
+  but each lag's weight spans R blocks, so the representable delay range is
+  (N_G + R − 2)·M samples  →  R=2: N_G·M (classic);
+  R=4 harness: (N_G+2)·M, e.g. N_G=8, M=128 → 1280 samples = 80 ms.
 
   Example: N=64, M=256 → covers 64×256 = 16384 samples = 1024ms at 16kHz
 ```
@@ -347,17 +361,23 @@ Works on pre-transformed frequency-domain inputs (no internal overlap-save).
 │  ═══════════════════════════════════════════════════════════                │
 │                                                                             │
 │  For each reference channel iref:                                           │
-│    new_R1 = rx_flipped * conj(Y_rx)         # autocorrelation contribution │
-│    autoR[iref] += α * new_R1                 # accumulate                   │
+│    new_R1    = conj(rx_flipped) * Y_rx       # autocorrelation contribution │
+│    autoR[iref]  += α * new_R1                # accumulate                   │
 │                                                                             │
-│    new_cross = rx_flipped * conj(Y)          # cross-correlation           │
+│    new_cross = conj(rx_flipped) * Y          # cross-correlation           │
 │    rcross[iref] += α * new_cross             # accumulate                  │
 │                                                                             │
 │    autoR[iref] *= β                          # forgetting factor            │
 │    rcross[iref] *= β                         # forgetting factor            │
 │                                                                             │
-│  autoR[k,p] ≈ Σ_n β^(N-n) * X[n] * conj(X[n-p])   (autocorrelation)      │
-│  rcross[k,p] ≈ Σ_n β^(N-n) * X[n] * conj(Y[n-p])   (cross-correlation)   │
+│  BOTH correlations conjugate the regressor (reference) side — the          │
+│  y = Σ_j w_j·X(t−j) convention whose normal equations are                  │
+│  toeplitz(autoR)·w = rcross with:                                           │
+│    autoR[k,p]  ≈ Σ_n β^(N-n)·conj(X[n-p])·X[n]   (autocorrelation)         │
+│    rcross[k,p] ≈ Σ_n β^(N-n)·conj(X[n-p])·Y[n]   (cross-correlation)       │
+│  Conjugating only one of the two mixes Hermitian conventions and           │
+│  yields w = T⁻¹·conj(T)·w_true (identity-probe verified 2026-09-23).       │
+│  Both buffers init to ZERO (consistent relation; silence self-gates).      │
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
 │  STEP 4: CG ADAPTATION (per frequency bin)                                 │
@@ -370,9 +390,16 @@ Works on pre-transformed frequency-domain inputs (no internal overlap-save).
 │    For each microphone channel:                                             │
 │      g = rcross[k, :] - T @ w_last[k, :]    # gradient (residual)         │
 │      p = g                                    # search direction            │
-│      α = (p^H · g) / (p^H · T · p)          # CG step size               │
-│      α = clip(α, -1, 1)                      # stability clamp             │
-│      w[k, :] = w_last[k, :] + α * p          # weight update              │
+│      num = 0.999 · (p^H · g)                                               │
+│      den = p^H · T · p                                                     │
+│      if den.real > 0 and |den| > 1e-30:   # positive-curvature guard      │
+│          α = num / den                       # (else α = 0: self-gates    │
+│      w[k, :] = w_last[k, :] + α * p          #  in silence / indefinite T)│
+│                                                                             │
+│  Optional G = [I_M, 0] tap constraint (Table 2 / PAES; tap_constraint     │
+│  parameter, default off): after the sweep, irfft each partition weight,   │
+│  zero taps ≥ K, rfft back — confines weights to the causal partition      │
+│  family. See §7 for why this alone is not sufficient.                     │
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
 │  STEP 5: RE-FILTER (with updated weights)                                  │
@@ -383,6 +410,10 @@ Works on pre-transformed frequency-domain inputs (no internal overlap-save).
 │  w_last = w.copy()                           # save for next frame         │
 │                                                                             │
 │  OUTPUT: output [NBIN, NCHAN]                                             │
+│    hop mode: the ZERO-HEADED a priori error spectrum rfft([0;e]) —      │
+│    IDENTICAL frame geometry to FD_NLMS (same in, same out; only the     │
+│    weight update differs; verified: max spectrum diff 6e-6 at beta=0).  │
+│    legacy mode: full-frame residual spectrum (historical behaviour).    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -508,41 +539,134 @@ Stability     Always stable                  Needs regularization
 
 ---
 
-## 7. The 2M-Point FFT
+## 7. Sub-Hop Delays: Representation vs the Criterion Cliff
 
-### The Problem: M-point FFT Can't Model Sub-Partition Delays
+> This section was rewritten 2026-09-24 after the white-noise oracle debug
+> (`results/2026-09-24_noise-oracle-debug/`). The old text claimed "the delay
+> is NOT representable" after switching to a 2M FFT — that is wrong in
+> general: **representation is exact; the full-frame criterion is the
+> blocker.** Figure: `docs/criterion_cliff.png` (reproduce with
+> `scratch_cliff_figure.py`; single-delay probes: `scratch_delay_mechanism.py`).
 
-```
-With M-point FFT (M=256), each partition models exactly p×M samples delay:
+### 7.1 What an L-point FFT weight can represent (exact, any delay)
 
-  Partition 0 → delay 0
-  Partition 1 → delay 256
-  Partition 2 → delay 512
-  Partition 3 → delay 768
-  ...
-
-  TRUE DELAY = 720 samples (45ms at 16kHz)
-
-  ┌──────────────────────────────────────────────┐
-  │  P2 (delay 512) ────────────┐                │
-  │                              │ 720 ← TRUE    │
-  │  P3 (delay 768) ────────────┘   GAP = 208!   │
-  │                                              │
-  │  The delay 720 is NOT representable.         │
-  │  Energy splits across P2 and P3,             │
-  │  and the CG solver assigns it to the         │
-  │  wrong partition.                            │
-  └──────────────────────────────────────────────┘
-```
-
-### The Solution: 2M-point FFT with Overlap-Save
+Each partition weight `w[·, j]` is one complex number per bin — i.e. the DFT
+of an **L-tap real FIR** `h_j`. Tap `m` of lag `j` paints input sample at
+window position `n − m` (circularly) of frame `t−j`:
 
 ```
-With 2M-point FFT (512 for M=256):
+  frame t output sample n (absolute t·M + n)
+  ◄──────────────────────────── L ─────────────────────────────►
+                                                    ◄── tail (KEPT) ──►
+  n: 0 ·········································· L−M ················· L
+      ┌─────────────────────────────────────────────┬───────────────────┐
+      │            head (overlap-save discards)     │   valid output    │
+      └─────────────────────────────────────────────┴───────────────────┘
+                    tap (j, m) contributes:
+                      m ≤ n   →  delay d = j·M + m        (clean, causal)
+                      m > n   →  delay d = j·M + m − L    (circular WRAP)
 
-  FFT size = 2M = 512 → frequency resolution = 2M bins
-  Each partition still covers M samples, but the
-  2M-point FFT provides phase information WITHIN each partition.
+  So a pure delay d = j·M + r (0 ≤ r < L−M) is represented EXACTLY by a
+  phase ramp in partition j — zeros in the head of the time-domain weight:
+
+     h_j = δ[m − r]   ⇔   w[b, j] = exp(−j·2π·b·r / L)
+```
+
+Measured: delay 800 = 6·128+32, weight `w[b,6] = exp(−j2πb·32/512)` cancels
+to **288.8 dB** on the kept tail — machine precision. Delay range covered:
+`[0, (N_G+R−2)·M]` (§3). **Sub-partition delays are perfectly representable.**
+
+### 7.2 Problem 1 (the real M-point issue): inter-block circular wrap
+
+With an M-point FFT and hop M (no overlap-save head), each block convolves
+*circularly*: a delay `r` inside a block wraps the first `r` output samples
+of every block to input from the END of the same block. Sub-block delays
+alias into wrong output samples — genuinely unmodelable. This is why
+`L ≥ 2M` overlap-save exists at all (§2), and that fix is correct.
+
+### 7.3 Problem 2 (the CLIFF): the full-frame criterion vs r ≠ 0
+
+`CONJUGATE_MDF` fits the **whole L-sample frame spectrum** — head included
+— even though only the last M samples are ever kept as output. For a delay
+with `r = d mod M ≠ 0` the true weight's response in the head contains
+circular-wrap spill:
+
+```
+  true delay 800 (L=512, M=128, r=32), one frame:
+
+  n:   0     32                                  384              512
+       │wrap │                                     └── KEPT tail ──┘
+       ▼     ▼
+  (6,32) → 288✗│──────── delay-800 echo ✓ ────────│──── ✓ ─────────┤
+  (7,416)→ ───│── ✓ ────── delay-800 echo ────────│── 1312 ✗ ──────┤
+              └── fixes [0,32) but corrupts [416,512): REMAINDER CHAIN
+
+  every patch for the head wraps garbage into a new region; the chain
+  closes ONLY for r = 0 (then tap m=0 paints the whole frame cleanly).
+```
+
+**Minimal worked example (L=8, M=2, delay d=3; `scratch_cliff_toy.py`):**
+tap (j=1,m=1) is the true tap, tap (j=2,m=7) is its wrap-patch. Which
+absolute input sample each tap reads per output n (t=0; target: abs = n−3):
+
+```
+        n=    0      1      2      3      4      5      6      7
+  (1,1)  +5✗   -2✓    -1✓    0✓    +1✓    +2✓    +3✓    +4✓      (✗ = FUTURE)
+  (2,7)  -3✓   -2✓    -1✓    0✓    +1✓    +2✓    +3✓   -4✗      (✗ = d=+11)
+  LS  →  h1[1] = 0.495, h2[7] = 0.505  (the HALF-SPLIT: correct taps share
+        amplitude; boundary samples n=0, n=7 keep ~half garbage each)
+  per-sample residual: n=0: -3.1 dB, n=1..6: -46..-59 dB, n=7: -2.9 dB
+  frame ERLE: 9.0 dB  — the cliff, in miniature.
+```
+
+The full-frame LS cannot give one tap amplitude 1 and the other 0: sample
+n=0 needs only the patch, sample n=7 needs only the true tap, samples in
+between need their sum = 1 → the compromise (0.5, 0.5) leaves every boundary
+sample half-wrong. With L=512 the boundary segment is `[0,r)` (and the
+patches' far edges), same compromise, ~10 dB.
+
+The LS must compromise → systematic bias. Measured on the white-noise
+oracle (batch per-bin LS = the class's β→1 fixed point):
+
+| delay | r = d mod M | full-frame LS tail ERLE | ramp (tail-only) |
+|-------|-------------|--------------------------|------------------|
+| 640, 768, 1152… | 0 | **~295–298 dB** | ~300 dB |
+| 800   | 32  | 10.3 dB (N_G = 8/12/16/24 — flat) | **288.8 dB** |
+| 960   | 64  | 6.1 dB | ~300 dB |
+| 736   | 96  | 5.7 dB | ~300 dB |
+
+**The cliff depends only on `d mod M` — not on L, not on R, not on N_G.**
+L = 512 (R=4) and L = 256 (R=2) give the SAME numbers at every delay
+(docs/criterion_cliff.png, both panels). Increasing the overlap cannot fix
+it; it only costs more frames per second.
+
+**Criterion-only A/B (scratch_classic_criterion.py, delay 800, identical
+pair-window geometry and regressors):** classic `[0;e]` criterion (error on
+the new block only — what standard FDAF/FBLMS/MDF, e.g. the original
+`echo_canceller_fdaf_apa_vss` rig, computes): optimum ≥ 288.7 dB. Full-frame
+per-bin criterion (what `CONJUGATE_MDF`'s correlations encode): 10.3 dB.
+Same data, same frames, same weights available — only the objective differs.
+
+### 7.4 Fixes
+
+| Route | What | Status |
+|---|---|---|
+| **CONJUGATE_MDF hop mode** (current default) | classic `[0;e]` criterion inside the CG class: `hop` parameter switches the adaptation to the accumulated exact valid-region gradient with FD-NLMS normalization (`mu`, `beta`=gradient averaging, G-constraint auto-on) **plus a reference-excitation gate** (adapt only when `P_ref > gate_rel·P_mic` and `P_ref > gate_floor·P_run` — freezes during reverb ring-down, digital silence, and double talk). `hop=None` = legacy | **implemented & PASS**: no cliff gap; canonical pair **24.47 dB / corr 0.9982**; reverb pause-kick damped (−9.0 → −3.0 dB at truncated coverage, +1 dB at full); white oracle unchanged; double-talk freeze free. Legacy FAILed on the same data. Correlation-based second-order steps provably cannot beat this — see FINDINGS |
+| Table 2 / PAES constrained criterion | full Table-2 machinery (circulant D_T from truncated rg + G̃-wrapped products, kmax>1, Polak-Ribière) — the deeper CG structure on top of the same valid-region criterion | future work on top of hop mode |
+| Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in conjugate_mdf.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged), vs CG-MDF legacy 9-10 dB saturated; the `full_frame_error=True` ablation of the SAME class cliffs (13 dB) — the convention is the sole variable |
+| Sample-domain engine | NLMS / time-domain CG: no windowing → no cliff | NLMS reaches the 49 dB oracle ceiling |
+| Hop-aligned data | delays that are multiples of M | exact even now (~300 dB) |
+
+### 7.5 Configuration cheat-sheet (aligned with the code)
+
+```
+  wrapper knobs (test_subband_echo_cancellation.CGMDF):
+      fft_size = L   (any R·M; current 512 = 4×128, classic 2M = 256)
+      step     = M   (hop; current 128)
+      n_g      = N_G (partitions; delay coverage (N_G+R−2)·M)
+
+  CONJUGATE_MDF itself is agnostic: it sees NBIN = L/2+1 bins and N_G
+  lagged frames; the geometry lives entirely in the wrapper's FFT/hop.
 ```
 
 ---
@@ -660,42 +784,43 @@ With 2M-point FFT (512 for M=256):
   TIME DOMAIN                    FREQUENCY DOMAIN               TIME DOMAIN
   ───────────                    ────────────────               ───────────
 
-  ref[n] ──→ ┌──────────────────────────────────────────────────────┐
-             │  BlockRLSBishengMDF (test_subband_echo_cancellation) │
-             │                                                      │
-             │  ┌─────────────┐    ┌─────────────────┐             │
-  x_block ──→│  │  rfft(x)    │───→│                 │             │
-  (fft_size) │  │  → X[k]     │    │  RLSBishengMDF  │             │
-             │  └─────────────┘    │  .apply(D, X)   │             │
-  d_block ──→│  ┌─────────────┐    │                 │             │
-  (fft_size) │  │  rfft(d)    │───→│  Returns E[k]   │             │
-             │  │  → D[k]     │    │                 │             │
-             │  └─────────────┘    └────────┬────────┘             │
-             │                              │                       │
-             │                     ┌────────▼────────┐             │
-             │                     │  irfft(E)        │             │
-             │                     │  → e_time        │             │
-             │                     │  take last       │             │
-             │                     │  step_size       │             │
-             │                     │  samples         │             │
-             │                     └────────┬────────┘             │
-             │                              │                       │
-             └──────────────────────────────┼───────────────────────┘
+  ref[n] ──→ ┌──────────────────────────────────────────────┐
+             │  CGMDF (test_subband_echo_cancellation)      │
+             │                                              │
+             │  ┌─────────────┐    ┌─────────────────┐      │
+  x_block ──→│  │  rfft(x)    │───→│                 │      │
+  (fft_size) │  │  → X[k]     │    │  CONJUGATE_MDF  │      │
+             │  └─────────────┘    │  .apply(D, X)   │      │
+  d_block ──→│  ┌─────────────┐    │                 │      │
+  (fft_size) │  │  rfft(d)    │───→│  Returns E[k]   │      │
+             │  │  → D[k]     │    │                 │      │
+             │  └─────────────┘    └────────┬────────┘      │
+             │                              │                │
+             │                     ┌────────▼────────┐       │
+             │                     │  irfft(E)        │      │
+             │                     │  → e_time        │      │
+             │                     │  take last       │      │
+             │                     │  step samples    │      │
+             │                     └────────┬────────┘       │
+             └──────────────────────────────┼────────────────┘
                                             │
   e_block ──────────────────────────────────┘
-  (step_size)
+  (step)
+
+  CURRENT CODE GEOMETRY (configurable — §2, §7.5):
+  ─────────────────────────
+  fft_size = 512, step = 128  →  R = 4 (75% overlap)
 
   FRAME ADVANCE:
   ──────────────
-  step_size = fft_size × (1 - overlap)
-            = 256 × (1 - 0.75) = 64 samples
+  step = hop M (independent of fft_size; only constraint L = R·M)
 
   Each frame:
-    Input:  fft_size = 256 samples (with 75% overlap from previous)
-    Output: step_size = 64 valid samples
+    Input:  fft_size = 512 samples (with 75% overlap from previous)
+    Output: step = 128 valid samples
 
   Total frames for 10s at 16kHz:
-    n_frames = (160000 - 256) / 64 ≈ 2496 frames
+    n_frames = (160000 - 512) / 128 + 1 ≈ 1246 frames
 ```
 
 ### Debug Funnel (When Things Go Wrong)
@@ -725,11 +850,16 @@ With 2M-point FFT (512 for M=256):
   │  │  │  └──────────────┬───────────────┘       │      │       │
   │  │  │                 │                        │      │       │
   │  │  │  ┌──────────────▼───────────────┐        │      │       │
-  │  │  │  │  ROOT CAUSE:                 │        │      │       │
-  │  │  │  │  M-point FFT can't model     │        │      │       │
-  │  │  │  │  sub-partition delays        │        │      │       │
+  │  │  │  │  ROOT CAUSE (§7):            │        │      │       │
+  │  │  │  │  full-frame criterion        │        │      │       │
+  │  │  │  │  contaminates the fit when   │        │      │       │
+  │  │  │  │  r = delay mod M ≠ 0         │        │      │       │
   │  │  │  │                              │        │      │       │
-  │  │  │  │  FIX: Use 2M-point FFT       │        │      │       │
+  │  │  │  │  FIX: Table-2 valid-region   │        │      │       │
+  │  │  │  │  (truncated) correlations,   │        │      │       │
+  │  │  │  │  or sample-domain engine     │        │      │       │
+  │  │  │  │  (NOT "use a bigger FFT" —  │        │      │       │
+  │  │  │  │  the cliff is R-independent) │        │      │       │
   │  │  │  └──────────────────────────────┘        │      │       │
   │  │  └──────────────────────────────────────────┘      │       │
   │  └─────────────────────────────────────────────────────┘       │

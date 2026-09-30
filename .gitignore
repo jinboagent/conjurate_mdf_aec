@@ -39,3 +39,11 @@ results/
 
 # Claude agent metadata (session-specific)
 .claude/
+matlab/
+scratch_test/
+
+*.png
+*.m
+*.txt
+*.wav
+
