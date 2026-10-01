@@ -16,6 +16,7 @@
 7. [Sub-Hop Delays: Representation vs the Criterion Cliff](#7-sub-hop-delays-representation-vs-the-criterion-cliff)
 8. [Echo Path Generation and Verification](#8-echo-path-generation-and-verification)
 9. [Test Harness Flow](#9-test-harness-flow)
+10. [Benchmark: 50 ms delay + lowpass pair](#10-benchmark-50-ms-delay--lowpass-pair-reference-target--20-db)
 
 ---
 
@@ -320,7 +321,14 @@ Total:                       O((4 + 2N) × M log M)
 
 ---
 
-## 5. Conjugate Gradient MDF Data Flow
+> **Historical note (2026-10-01):** the class described in this section —
+> the full-frame Toeplitz-CG criterion — was REMOVED from
+> `conjugate_mdf.py` at user request (canonical `[0;e]`-only now; see
+> §7.4 and results/2026-10-01_class-simplify/). The flow below remains
+> as the record of that criterion; for the current class read §7 and the
+> module docstring. Recoverable from git `2f23d9d`.
+
+## 5. Conjugate Gradient MDF Data Flow (HISTORICAL — legacy criterion)
 
 `conjugate_mdf.py` — frequency-domain conjugate gradient with Toeplitz matrix adaptation.
 Works on pre-transformed frequency-domain inputs (no internal overlap-save).
@@ -651,7 +659,7 @@ Same data, same frames, same weights available — only the objective differs.
 
 | Route | What | Status |
 |---|---|---|
-| **CONJUGATE_MDF hop mode** (current default) | classic `[0;e]` criterion inside the CG class: `hop` parameter switches the adaptation to the accumulated exact valid-region gradient with FD-NLMS normalization (`mu`, `beta`=gradient averaging, G-constraint auto-on) **plus a reference-excitation gate** (adapt only when `P_ref > gate_rel·P_mic` and `P_ref > gate_floor·P_run` — freezes during reverb ring-down, digital silence, and double talk). `hop=None` = legacy | **implemented & PASS**: no cliff gap; canonical pair **24.47 dB / corr 0.9982**; reverb pause-kick damped (−9.0 → −3.0 dB at truncated coverage, +1 dB at full); white oracle unchanged; double-talk freeze free. Legacy FAILed on the same data. Correlation-based second-order steps provably cannot beat this — see FINDINGS |
+| **CONJUGATE_MDF** (current; canonical-only since 2026-10-01) | the classic `[0;e]` MDF — exact valid-region gradient, FD-NLMS normalization (`mu`, `beta`=gradient averaging), G-constraint built in, reference-excitation gate. No mode switch: `hop` is a plain required parameter; the legacy full-frame criterion and its plumbing were removed at user request (recoverable from git `2f23d9d`) | **implemented & PASS**: canonical pair **23.77 dB / corr 0.9982**; noise oracle 43.2 dB with the true path learned exactly; cliff check 45.2/44.3 dB at delays 640/800 (no gap); `beta=0` ≡ FD_NLMS **exactly** (1.6e-16) |
 | Table 2 / PAES constrained criterion | full Table-2 machinery (circulant D_T from truncated rg + G̃-wrapped products, kmax>1, Polak-Ribière) — the deeper CG structure on top of the same valid-region criterion | future work on top of hop mode |
 | Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in conjugate_mdf.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged), vs CG-MDF legacy 9-10 dB saturated; the `full_frame_error=True` ablation of the SAME class cliffs (13 dB) — the convention is the sole variable |
 | Sample-domain engine | NLMS / time-domain CG: no windowing → no cliff | NLMS reaches the 49 dB oracle ceiling |
@@ -868,6 +876,47 @@ Same data, same frames, same weights available — only the objective differs.
   ALWAYS simplify first:
     Complex path → single tap → partition-aligned → check internals
 ```
+
+---
+
+## 10. Benchmark: 50 ms delay + lowpass pair (reference target ≥ 20 dB)
+
+The canonical correctness pair: white-noise reference, mic = butter(2,0.3)
+lowpass at 50 ms delay, gain 0.1 (`audio/noise_*.wav`,
+`create_noise_echo.py`; true path peak 0.0365 @ sample 802). Both engines,
+standard buffer processing (FFT 512 / hop 128, n_g=8, `[0;e]` +
+G-constraint + excitation gate, official metric):
+
+| configuration | ERLE | learned path |
+|---|---|---|
+| FD_NLMS raw frames | **43.2 dB** | **0.0365 @ 802 — exact** |
+| CG-MDF hop (β=0.3) raw frames | **43.3 dB** | **0.0365 @ 802 — exact** |
+| CG-MDF hop (β=0) | 43.2 dB | ≡ FD_NLMS digit-for-digit |
+| either, Hann frames + WOLA (μ=1) | 36.4 dB | window coordinates |
+
+Reading: the target is exceeded by > 20 dB and the true path is learned
+exactly (amplitude and position) — the overlap-save tail-keep buffer
+processing is fully correct. The Hann-window variant (the matlab/ rig
+lesson applied WITHOUT a filterbank: window on the frames, OLA on the
+output) is stable at μ=1 on white noise — the divergence case is
+spectral holes in *colored speech* (§9/§7 notes; there, detune to
+μ≈0.1 + a relative normalizer floor) — but costs ~7 dB on flat spectra,
+so raw frames are the recommendation for this class.
+
+Reproduce: `.venv/Scripts/python scratch_lowpass_compare.py`;
+record: `results/2026-10-01_lowpass-benchmark/`.
+
+**Same recipe on 30 s SPEECH** (`audio/speechlp_*.wav`: original_speech
+tiled ×3, butter(2,0.3)@50 ms, gain 0.4; true peak 0.1459 @ 802):
+FD_NLMS **21.7 dB** overall; CG-MDF hop **21.7 dB at β=0** (≡ FD_NLMS)
+and **20.3 dB at β=0.05** — voiced seconds reach 47–57 dB, last-5-s
+≈ 42 dB, and both learn the true path to 0.6 % amplitude / 1 sample
+position. β guidance on speech: use β ≤ 0.05 for maximum performance
+(the averaging knob trades average ERLE for mic-noise robustness);
+per-second dips are speech pauses (mic = pure echo ⇒ noise-dominated
+ratios), not failures. Reproduce: `scratch_speechlp_bench.py`;
+generator: `create_noise_echo.py 50 0.4 0.3 audio/speech30.wav 30
+speechlp`; record: `results/2026-10-01_speechlp-benchmark/`.
 
 ---
 

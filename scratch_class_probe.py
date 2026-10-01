@@ -7,7 +7,7 @@ mic, sr = sf.read('audio/microphone.wav')
 FFT, STEP, N_G = 512, 128, 64
 nbin = FFT//2+1
 np.random.seed(3)
-cg = CONJUGATE_MDF(NCHAN=1, NBIN=nbin, N_G=N_G, alpha=0.03, beta=0.97, bin_lim=nbin, Nrxref=1)
+cg = CONJUGATE_MDF(NCHAN=1, NBIN=nbin, N_G=N_G, hop=128, Nrxref=1)
 n_frames = (len(mic)-FFT)//STEP + 1
 for i in range(n_frames):
     s=i*STEP

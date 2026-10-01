@@ -62,23 +62,16 @@ class NLMS:
 
 class CGMDF:
     """FFT-frame wrapper around CONJUGATE_MDF (overlap-save: one 512-frame in,
-    128 valid tail samples out). zero_head=True (default) runs the classic
-    [0;e] criterion (hop mode — no delay-mod-hop cliff, docs/DATAFLOW.md §7)
-    with the classic G=[I_hop,0] weight constraint and beta as the
-    gradient-averaging factor (0 = exactly FD_NLMS's instantaneous update;
-    0.3 default trades a little speed for gradient smoothing). Defaults
-    n_g=8 match the canonical 50 ms echo-path support (8 x 128 samples).
-    zero_head=False restores the legacy full-frame Toeplitz-CG criterion
-    (use beta=0.99, tap_constraint=None there)."""
+    128 valid tail samples out) — the canonical [0;e] MDF with the
+    excitation gate; beta is the gradient-averaging factor (0 = exactly
+    FD_NLMS's instantaneous update)."""
 
-    def __init__(self, fft_size=512, step=128, n_g=8, alpha=0.03, beta=0.3,
-                 bin_skip=0, zero_head=True, mu=1.0):
+    def __init__(self, fft_size=512, step=128, n_g=8, mu=1.0, beta=0.0,
+                 bin_skip=0, gate_rel=0.3):
         self.fft_size, self.step = fft_size, step
         self.cg = CONJUGATE_MDF(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
-                                alpha=alpha, beta=beta,
-                                bin_lim=fft_size // 2 + 1, bin_skip=bin_skip,
-                                hop=step if zero_head else None, mu=mu,
-                                tap_constraint=step if zero_head else None)
+                                hop=step, mu=mu, beta=beta,
+                                bin_skip=bin_skip, gate_rel=gate_rel)
 
     def process(self, x_frame, d_frame):
         E = self.cg.apply(np.fft.rfft(d_frame).reshape(-1, 1),

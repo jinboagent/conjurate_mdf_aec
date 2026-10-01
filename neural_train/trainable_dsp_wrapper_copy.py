@@ -363,8 +363,10 @@ def train_weights(mode, Xp_t, d_tail_t, Xp_np, d_tail_np, c_batch_m=C_BATCH_M):
 # ---------------------------------------------------------------------------
 def run_reference(X_spec, D_spec, n_blocks):
     np.random.seed(SEED)
-    filt = CONJUGATE_MDF(NCHAN=1, NBIN=NBIN, N_G=N_G,
-                         alpha=ALPHA, beta=BETA, bin_lim=NBIN, Nrxref=1)
+    # canonical [0;e] MDF (hop mode); the legacy Toeplitz criterion was
+    # removed from the class — this reference now runs the canonical mode
+    filt = CONJUGATE_MDF(NCHAN=1, NBIN=NBIN, N_G=N_G, hop=STEP,
+                         mu=1.0, beta=0.0, gate_rel=None, Nrxref=1)
     w_init = filt.w_last[0][:, :, 0].astype(np.complex64)        # capture for TF port
     e_ref = np.zeros((n_blocks, STEP), dtype=np.float32)
     for b in range(n_blocks):
