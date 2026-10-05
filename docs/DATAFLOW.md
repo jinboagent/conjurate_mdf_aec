@@ -362,7 +362,6 @@ instantaneous gradient (`beta=0` reproduces it exactly, 1.6e-16).
 │  R       = Y - est                           # full-frame residual spectrum │
 │  e_tail  = irfft(R)[L-hop:]                  # residual of the NEW block    │
 │  E_zh    = rfft([ zeros(L-hop) ; e_tail ])   # zero-headed error [0;e]      │
-│  E_upd   = R  if full_frame_error else E_zh  # ablation flag (§7.4)         │
 │                                                                             │
 │  ─── THE CRITERION: the update grades ONLY the new block. The overlap-save │
 │      head (circular wrap) never biases the weights — this is the cliff fix.│
@@ -441,8 +440,10 @@ The pre-2026-10-01 class accumulated full-frame correlations
 Toeplitz system `toeplitz(autoR)·w = rcross` with a positive-curvature
 guard. Its criterion graded the WHOLE frame (head included), which is
 exactly the cliff condition of §7.3 — the reason it was removed. The
-full-frame mode is preserved as the `full_frame_error=True` ablation
-flag (§7.4); the complete Toeplitz-CG machinery is in git `2f23d9d`.
+full-frame mode existed briefly as a `full_frame_error` ablation flag
+(removed 2026-10-05 as well); the measured ablation numbers are in
+results/2026-10-01_hop-ablation/ and the complete Toeplitz-CG
+machinery in git `2f23d9d`.
 
 ---
 
@@ -520,10 +521,15 @@ flag (§7.4); the complete Toeplitz-CG machinery is in git `2f23d9d`.
   • Toeplitz structure allows O(N²) solve (vs O(N³) for general matrix)
 ```
 
-### Strategy 3: Conjugate Gradient (PFDAF-CG, `pfdaf_cg.py` — NOT WIRED)
+### Strategy 3: Conjugate Gradient (PFDAF-CG, `pfdaf_cg.py` — implemented 2026-10-05)
 
-> Status: `pfdaf_cg.py` crashes at init (missing `d_old`/`D` state) and is
-> not used by any test; kept for reference only.
+> Status: **implemented and benchmarked** (García Morales et al., AES 2006;
+> user's original draft corrected — 6 errors listed in
+> results/2026-10-05_pfdaf-cg/FINDINGS.md). `PFDAF_CG` shares the exact
+> frame contract of §5 ([0;e] + gate + G-projection); official key `pfcg`
+> **26.11 dB PASS** vs FD_NLMS 23.77. One CG step per frame:
+> v = g + β·v_prev on the memory-averaged gradient Φ (γ≈0.4), regularized
+> Gram line search, k_max > 1 diverges; β methods ranked HS ≥ DY > PR ≫ FR.
 
 ```
                     ┌─────────────────────────────────────┐
@@ -665,9 +671,10 @@ objective differs.
 
 | Route | What | Status |
 |---|---|---|
-| **CONJUGATE_MDF** (current; canonical-only since 2026-10-01) | the classic `[0;e]` MDF — exact valid-region gradient, FD-NLMS normalization (`mu`, `beta`=gradient averaging), G-constraint built in, reference-excitation gate. No mode switch: `hop` is a plain required parameter; the legacy full-frame criterion was removed at user request (recoverable from git `2f23d9d`) and survives only as the `full_frame_error=True` ablation flag (added 2026-10-01, output geometry unchanged) | **implemented & PASS**: canonical pair **23.77 dB / corr 0.9982**; noise oracle 43.2 dB with the true path learned exactly; cliff check 45.2/44.3 dB at delays 640/800 (no gap); `beta=0` ≡ FD_NLMS **exactly** (1.6e-16) |
+| **CONJUGATE_MDF** (current; canonical-only since 2026-10-01) | the classic `[0;e]` MDF — exact valid-region gradient, FD-NLMS normalization (`mu`, `beta`=gradient averaging), G-constraint built in, reference-excitation gate. No mode switch: `hop` is a plain required parameter; the legacy full-frame criterion was removed at user request (recoverable from git `2f23d9d`; the brief `full_frame_error` ablation flag was removed 2026-10-05 too — measured ablation in results/2026-10-01_hop-ablation/) | **implemented & PASS**: canonical pair **23.77 dB / corr 0.9982**; noise oracle 43.2 dB with the true path learned exactly; cliff check 45.2/44.3 dB at delays 640/800 (no gap); `beta=0` ≡ FD_NLMS **exactly** (1.6e-16) |
 | Table 2 / PAES constrained criterion | full Table-2 machinery (circulant D_T from truncated rg + G̃-wrapped products, kmax>1, Polak-Ribière) — the deeper CG structure on top of the same valid-region criterion | future work on top of hop mode |
-| Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in conjugate_mdf.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged); the `full_frame_error=True` ablation of the SAME class cliffs — canonical pair 5.40 dB vs 23.77, synthetic delay-800 13.0 vs 44.3 (results/2026-10-01_hop-ablation/) |
+| Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in conjugate_mdf.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged); the whole-frame ablation (removed flag, re-measured 2026-10-01) cliffs — canonical pair 5.40 dB vs 23.77, synthetic delay-800 13.0 vs 44.3 (results/2026-10-01_hop-ablation/) |
+| **PBFDAF-CG (AES 2006)** | `PFDAF_CG` in pfdaf_cg.py — CG direction on the memory-averaged [0;e] gradient + per-bin Gram line search; official key `pfcg` | **implemented & PASS**: canonical **26.11 dB / corr 0.999** (26.31 before the gate-restart hardening), noise 48.06, speechlp 31.44; benefit grows with signal length (canonical×4 20 s: 27.63 vs FD_NLMS 17.69); β ranking HS ≥ DY > PR ≫ FR (results/2026-10-05_pfdaf-cg/) |
 | Unconstrained FDAF (no G-projection; Mansour & Gray UFLMS) | `--no-constraint` (FD_NLMS) — skip the per-partition irfft/rfft projection | **no cliff, and +2.4 dB on the canonical pair (26.16 vs 23.77)**: each partition keeps its wrap taps, which add sub-hop delay freedom; weights are no longer hop-tap causal filters |
 | Sample-domain engine | NLMS / time-domain CG: no windowing → no cliff | NLMS reaches the 49 dB oracle ceiling |
 | Hop-aligned data | delays that are multiples of M | exact even now (~300 dB) |
@@ -807,8 +814,8 @@ Two generators exist; do not mix them up:
   ───────────                    ────────────────               ───────────
 
   ref[n] ──→ ┌──────────────────────────────────────────────┐
-             │  CGMDF / FDNLMS (test_subband_echo_cancellation) │
-             │  (identical wrapper; CLI keys 'cgmdf'/'fdnlms')  │
+             │  CGMDF / FDNLMS / PFCG (test_subband_echo_cancellation) │
+             │  (identical wrapper; CLI keys 'cgmdf'/'fdnlms'/'pfcg')  │
              │                                              │
              │  ┌─────────────┐    ┌─────────────────┐      │
   x_block ──→│  │  rfft(x)    │───→│                 │      │
@@ -939,7 +946,7 @@ speechlp`; record: `results/2026-10-01_speechlp-benchmark/`.
 |------|-----------|-------------|
 | `pfadf_mdf_cg.py` | PFADF MDF CG | [§4](#4-pfdaf-data-flow-lms-baseline) |
 | `conjugate_mdf.py` | CONJUGATE_MDF (canonical `[0;e]`) + FD_NLMS | [§5](#5-canonical-conjugate_mdf-data-flow), [§7](#7-sub-hop-delays-representation-vs-the-criterion-cliff) |
-| `pfdaf_cg.py` | PFDAF-CG (broken init, not wired) | [§6 Strategy 3](#6-weight-update-strategies) |
-| `test_subband_echo_cancellation.py` | Block wrapper (keys: nlms / fdnlms / cgmdf) | [§9](#9-test-harness-flow) |
-| `run_fdnlms.py` | CLI driver for FD_NLMS / CONJUGATE_MDF A/B runs | [§10](#10-benchmark-50-ms-delay--lowpass-pair-reference-target--20-db) |
+| `pfdaf_cg.py` | PFDAF-CG (AES 2006, working; official key `pfcg`) | [§6 Strategy 3](#6-weight-update-strategies) |
+| `test_subband_echo_cancellation.py` | Block wrapper (keys: nlms / fdnlms / cgmdf / pfcg) | [§9](#9-test-harness-flow) |
+| `run_fdnlms.py` | CLI driver: FD_NLMS / CONJUGATE_MDF / PFDAF-CG A/B runs | [§10](#10-benchmark-50-ms-delay--lowpass-pair-reference-target--20-db) |
 | `test_echo_path_comparison.py` | Shared-harness comparison on the ground-truth room path | [§8](#8-echo-path-generation-and-verification) |

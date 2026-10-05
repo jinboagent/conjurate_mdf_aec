@@ -12,7 +12,7 @@ Outputs (written to the current directory):
 and prints delay estimation, ERLE, band ERLE, echo-estimation correlation and
 learned-path metrics (shared implementations from harness/metrics/).
 
-CLI keys: 'cgmdf' (default; alias 'rls'), 'fdnlms', 'nlms' (alias 'lms').
+CLI keys: 'cgmdf' (default; alias 'rls'), 'fdnlms', 'pfcg', 'nlms' (alias 'lms').
 """
 
 import os
@@ -26,6 +26,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from conjugate_mdf import CONJUGATE_MDF, FD_NLMS
+from pfdaf_cg import PFDAF_CG
 from harness.metrics.comparison import (calculate_correlation,
                                         calculate_echo_path_metrics,
                                         calculate_erle)
@@ -94,6 +95,25 @@ class FDNLMS:
         return np.fft.irfft(E[:, 0], n=self.fft_size)[-self.step:]
 
 
+class PFCG:
+    """FFT-frame wrapper around PFDAF_CG (García Morales et al., AES 2006)
+    — conjugate-gradient update on the averaged [0;e] gradient; same
+    buffer/output geometry as CGMDF/FDNLMS."""
+
+    def __init__(self, fft_size=512, step=128, n_g=8, gamma=0.4, k_max=1,
+                 beta_method='hestenes-stiefel', gate_rel=0.3):
+        self.fft_size, self.step = fft_size, step
+        self.cg = PFDAF_CG(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
+                           hop=step, gamma=gamma, k_max=k_max,
+                           beta_method=beta_method, constrain='full',
+                           gate_rel=gate_rel)
+
+    def process(self, x_frame, d_frame):
+        E = self.cg.apply(np.fft.rfft(d_frame).reshape(-1, 1),
+                          np.fft.rfft(x_frame).reshape(-1, 1))
+        return np.fft.irfft(E[:, 0], n=self.fft_size)[-self.step:]
+
+
 # ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
@@ -119,7 +139,7 @@ def run(algorithm, ref, mic):
             out[i:j] = f.process(ref[i:j], mic[i:j])
         return out, f
 
-    f = FDNLMS() if algorithm == 'fdnlms' else CGMDF()
+    f = {'fdnlms': FDNLMS, 'pfcg': PFCG}.get(algorithm, CGMDF)()
     head = f.fft_size - f.step      # overlap-save: discard contaminated head
     for i in tqdm(range((len(ref) - head) // f.step), desc=algorithm.upper()):
         s = i * f.step
@@ -162,8 +182,10 @@ def main(algorithm='cgmdf'):
               f"samples, amplitude error {m['amplitude_error_db']:.1f} dB, "
               f"NMSE {m['nmse_db']:.1f} dB")
     else:
-        w = f.cg.w[0] if algorithm != 'fdnlms' else f.fdn.w[0]
-        print(f"{'CG-MDF' if algorithm != 'fdnlms' else 'FD-NLMS'} |W|: "
+        eng = {'cgmdf': 'CG-MDF', 'fdnlms': 'FD-NLMS', 'pfcg': 'PFDAF-CG'}
+        core = f.cg if algorithm in ('cgmdf', 'pfcg') else f.fdn
+        w = core.w[0]
+        print(f"{eng.get(algorithm, 'CG-MDF')} |W|: "
               f"max {np.abs(w).max():.3f}, mean {np.abs(w).mean():.3f}")
 
     # ---- artifacts ----

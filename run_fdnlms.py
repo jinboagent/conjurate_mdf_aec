@@ -21,10 +21,14 @@ Usage:
        "canonical" is an alias of "reference microphone")
 
     Options:
-    --algo fdnlms|cgmdf   (default fdnlms)
+    --algo fdnlms|cgmdf|pfcg   (default fdnlms; pfcg = PBFDAF-CG, AES 2006)
     --n-g N               partitions (default 8)
     --mu F                step (default 1.0)
     --beta F              cgmdf gradient averaging (default 0.3)
+    --gamma F             pfcg gradient-memory averaging (default 0.4)
+    --k-max N             pfcg CG iterations per frame (default 1; >1 diverges)
+    --beta-method M       pfcg conjugation: hestenes-stiefel (default) |
+                          fletcher-reeves | polak-ribiere | dai-yuan
     --no-constraint       disable the G=[I_hop,0] weight constraint
     --no-gate             disable the reference-excitation gate
     --delay D             synthetic pure-delay pair from the noise reference
@@ -41,6 +45,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from conjugate_mdf import CONJUGATE_MDF, FD_NLMS
+from pfdaf_cg import PFDAF_CG
 from harness.metrics.comparison import calculate_correlation, calculate_erle
 
 FFT, HOP, head = 512, 128, 384
@@ -78,10 +83,16 @@ def main():
     import argparse
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('pair', nargs='?', default='canonical')
-    p.add_argument('--algo', choices=['fdnlms', 'cgmdf'], default='fdnlms')
+    p.add_argument('--algo', choices=['fdnlms', 'cgmdf', 'pfcg'],
+                   default='fdnlms')
     p.add_argument('--n-g', type=int, default=8)
     p.add_argument('--mu', type=float, default=1.0)
     p.add_argument('--beta', type=float, default=0.0)
+    p.add_argument('--gamma', type=float, default=0.4)
+    p.add_argument('--k-max', type=int, default=1)
+    p.add_argument('--beta-method', default='hestenes-stiefel',
+                   choices=['hestenes-stiefel', 'fletcher-reeves',
+                            'polak-ribiere', 'dai-yuan'])
     p.add_argument('--no-constraint', action='store_true')
     p.add_argument('--no-gate', action='store_true')
     p.add_argument('--delay', type=int, default=None)
@@ -102,6 +113,11 @@ def main():
     if args.algo == 'fdnlms':
         f = FD_NLMS(NCHAN=1, NBIN=FFT//2+1, N_G=args.n_g, mu=args.mu,
                     hop=HOP, constraint=cons, gate_rel=gate)
+    elif args.algo == 'pfcg':
+        f = PFDAF_CG(NCHAN=1, NBIN=FFT//2+1, N_G=args.n_g, hop=HOP,
+                     gamma=args.gamma, k_max=args.k_max,
+                     beta_method=args.beta_method, constrain='full',
+                     gate_rel=gate)
     else:
         f = CONJUGATE_MDF(NCHAN=1, NBIN=FFT//2+1, N_G=args.n_g, hop=HOP,
                           mu=args.mu, beta=args.beta, gate_rel=gate)

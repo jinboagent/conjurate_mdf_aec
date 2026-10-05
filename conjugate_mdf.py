@@ -66,11 +66,12 @@ class CONJUGATE_MDF:
     __slots__ = ['nchan', 'nbin', 'N_G', 'Nrxref', 'hop', 'mu', 'beta',
                  'bin_skip', 'gate_rel', 'gate_hold', 'gate_decay',
                  'gate_floor', '_Prun', '_hold',
+                 'sr',
                  'buf_Y_rx', 'gacc', 'Pn', 'w', 'w_last', 'output', 'e']
 
     def __init__(self, NCHAN, NBIN, N_G, hop, mu=1.0, beta=0.0,
                  bin_skip=0, Nrxref=1, gate_rel=0.3, gate_hold=2,
-                 gate_decay=1.5, gate_floor=1e-6):
+                 gate_decay=1.5, gate_floor=1e-6, sr=16000.0):
         self.nchan = NCHAN
         self.nbin = NBIN
         self.N_G = int(N_G)
@@ -85,6 +86,7 @@ class CONJUGATE_MDF:
         self.gate_hold = max(1, int(gate_hold))
         self.gate_decay = float(gate_decay)
         self.gate_floor = float(gate_floor)
+        self.sr = float(sr)
         self.reset()
 
     def reset(self):
@@ -142,7 +144,7 @@ class CONJUGATE_MDF:
         if self.gate_rel is not None:
             P_ref = float(np.sum(np.abs(Y_rx) ** 2))
             P_mic = float(np.sum(np.abs(Y) ** 2))
-            decay = np.exp(-self.hop / (16000.0 * self.gate_decay))
+            decay = np.exp(-self.hop / (self.sr * self.gate_decay))
             self._Prun = max(P_ref, decay * self._Prun)
             if (P_ref > self.gate_rel * P_mic and
                     P_ref > self.gate_floor * self._Prun):
@@ -155,14 +157,16 @@ class CONJUGATE_MDF:
         #    operator is linear, so accumulating conj(X)*E_zh needs no
         #    bin-decoupling approximation) and the normalizer power.
         beta = self.beta
+        # normalizer: sum over partitions AND references (matches FD_NLMS's
+        # X2; must be applied once per frame, not per reference)
+        self.Pn = beta * self.Pn + (1 - beta) * np.sum(
+            np.abs(rx_flipped) ** 2, axis=(1, 2))
         for iref in range(self.Nrxref):
             new_acc = np.conj(rx_flipped[:, :, iref:iref+1]) * E_zh[:, np.newaxis, :]
             if gate_open:
                 self.gacc[iref] = beta * self.gacc[iref] + new_acc
             else:
                 self.gacc[iref] *= beta      # let the stale gradient fade
-            self.Pn = beta * self.Pn + (1 - beta) * np.sum(
-                np.abs(rx_flipped[:, :, iref]) ** 2, axis=1)
 
         # 5. normalized update + G = [I_hop, 0] projection (the canonical
         #    MDF weight definition: each partition is an `hop`-tap causal
@@ -181,6 +185,14 @@ class CONJUGATE_MDF:
                 Wt = np.fft.irfft(self.w[iref], n=nfft, axis=0)
                 Wt[self.hop:] = 0.0
                 self.w[iref] = np.fft.rfft(Wt, n=nfft, axis=0)
+                # the G-projection couples bins, so it re-injects weight
+                # into the skipped low bins; re-freeze them AFTER the
+                # projection (the two projections do not commute — with
+                # bin_skip > 0 the weight's time taps are no longer
+                # strictly hop-causal between here and the next projection;
+                # acceptable because these bins are normally covered by a
+                # downstream high-pass filter)
+                self.w[iref][:self.bin_skip] = 0.0
         else:
             for iref in range(self.Nrxref):
                 self.w[iref] = self.w_last[iref].copy()
@@ -212,12 +224,13 @@ class FD_NLMS:
                  'constraint', 'eps',
                  'gate_rel', 'gate_hold', 'gate_decay', 'gate_floor',
                  '_Prun', '_hold',
+                 'sr',
                  'buf_Y_rx', 'w', 'P_X', 'output', 'e', 'X2']
 
     def __init__(self, NCHAN, NBIN, N_G, mu, hop,
                  Nrxref=1, constraint=True,
                  eps=1e-10, gate_rel=0.3, gate_hold=2, gate_decay=1.5,
-                 gate_floor=1e-6):
+                 gate_floor=1e-6, sr=16000.0):
         self.nchan = NCHAN
         self.nbin = NBIN
         self.N_G = int(N_G)
@@ -234,6 +247,7 @@ class FD_NLMS:
         self.gate_hold = max(1, int(gate_hold))
         self.gate_decay = float(gate_decay)
         self.gate_floor = float(gate_floor)
+        self.sr = float(sr)
         self.reset()
 
     def reset(self):
@@ -278,7 +292,7 @@ class FD_NLMS:
         if self.gate_rel is not None:
             P_ref = float(np.sum(np.abs(Y_rx) ** 2))
             P_mic = float(np.sum(np.abs(Y) ** 2))
-            decay = np.exp(-self.hop / (16000.0 * self.gate_decay))
+            decay = np.exp(-self.hop / (self.sr * self.gate_decay))
             self._Prun = max(P_ref, decay * self._Prun)
             if (P_ref > self.gate_rel * P_mic and
                     P_ref > self.gate_floor * self._Prun):

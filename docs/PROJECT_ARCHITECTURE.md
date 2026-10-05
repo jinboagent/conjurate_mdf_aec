@@ -29,11 +29,11 @@ This project implements and compares frequency-domain adaptive filtering algorit
                               │
               ┌───────────────┼───────────────┐
               │               │               │
-         Partitioned-Block   CG-MDF        PFDAF-CG
-         (MDF style)        (Toeplitz CG)  (CG variant)
+         Partitioned-Block   canonical MDF      PBFDAF-CG
+         (MDF style)        ([0;e] + beta avg)  (AES 2006)
               │               │               │
     pfadf_mdf_cg.py    conjugate_mdf.py    pfdaf_cg.py
-    (Normalized grad)  (Toeplitz CG)       (Conjugate Grad)
+    (Normalized grad)  (Normalized grad)   (Gram line-search CG)
 ```
 
 ### Algorithm Descriptions
@@ -41,8 +41,8 @@ This project implements and compares frequency-domain adaptive filtering algorit
 | Algorithm | File | Adaptation | Partitions | Use Case |
 |---|---|---|---|---|
 | **PFADF MDF CG** | `pfadf_mdf_cg.py` | Normalized gradient | N blocks | Stable + sub-partition delay |
-| **Conjugate Gradient MDF** | `conjugate_mdf.py` | Conjugate Gradient (Toeplitz) | N blocks | Fastest convergence |
-| **PFDAF-CG** | `pfdaf_cg.py` | Conjugate Gradient | N blocks | Fast convergence |
+| **CONJUGATE_MDF** | `conjugate_mdf.py` | Normalized gradient + beta-averaging + gate | N blocks | Reference implementation, cliff-free |
+| **PBFDAF-CG** | `pfdaf_cg.py` | CG direction on averaged gradient + Gram line search | N blocks | Fastest on longer signals |
 
 ## 3. Data Flow
 
@@ -143,9 +143,9 @@ Echo paths can be generated using the `create_test_files.py` script, which creat
 ### Core Algorithms
 | File | Class/Function | Description |
 |---|---|---|
-| `conjugate_mdf.py` | `RLSBishengMDF` | Primary CG-MDF with 2M-point FFT, normalized gradient |
+| `conjugate_mdf.py` | `CONJUGATE_MDF`, `FD_NLMS` | Canonical [0;e] MDF + classic FDAF baseline (same geometry) |
 | `pfadf_mdf_cg.py` | `PFADFMDFCG` | Inline CG-MDF with filt()/update() interface |
-| `pfdaf_cg.py` | `PFDAFCG` | Conjugate gradient variant |
+| `pfdaf_cg.py` | `PFDAF_CG`, `PFDAFCG` | PBFDAF-CG (AES 2006) — CG on the memory-averaged gradient; official key pfcg |
 
 ### Test Scripts
 | File | What it tests |
@@ -183,7 +183,7 @@ Echo paths can be generated using the `create_test_files.py` script, which creat
 
 | Value | Use Case | Reference |
 |---|---|---|
-| 1e-10 | Fixed, tiny (under-regularized) | pfdaf_cg.py |
+| delta (relative loading, eq. 22) | 0.5 | pfdaf_cg.py (AES 2006 stability constant) |
 | mean(e²)/mean(x²) | Signal-proportional (optimal) | Haykin, REGULARIZATION_RESEARCH.md |
 
 **Verdict**: Signal-proportional ε = mean(e²)/mean(x²) gives best results (ERLE: 23→70 dB on identity test).
