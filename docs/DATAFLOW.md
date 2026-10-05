@@ -11,7 +11,7 @@
 2. [Overlap-Save Block Processing](#2-overlap-save-block-processing)
 3. [Partitioned Buffer Structure](#3-partitioned-buffer-structure)
 4. [PFDAF Data Flow (LMS Baseline)](#4-pfdaf-data-flow-lms-baseline)
-5. [Conjugate Gradient MDF Data Flow](#5-conjugate-gradient-mdf-data-flow)
+5. [Canonical CONJUGATE_MDF Data Flow](#5-canonical-conjugate_mdf-data-flow)
 6. [Weight Update Strategies](#6-weight-update-strategies)
 7. [Sub-Hop Delays: Representation vs the Criterion Cliff](#7-sub-hop-delays-representation-vs-the-criterion-cliff)
 8. [Echo Path Generation and Verification](#8-echo-path-generation-and-verification)
@@ -321,130 +321,128 @@ Total:                       O((4 + 2N) × M log M)
 
 ---
 
-> **Historical note (2026-10-01):** the class described in this section —
-> the full-frame Toeplitz-CG criterion — was REMOVED from
-> `conjugate_mdf.py` at user request (canonical `[0;e]`-only now; see
-> §7.4 and results/2026-10-01_class-simplify/). The flow below remains
-> as the record of that criterion; for the current class read §7 and the
-> module docstring. Recoverable from git `2f23d9d`.
+> **Historical note (2026-10-01):** the legacy full-frame Toeplitz-CG
+> criterion that this section previously described was REMOVED from
+> `conjugate_mdf.py` (recoverable from git `2f23d9d`; records in
+> results/2026-10-01_class-simplify/). The flow below is the CURRENT
+> canonical class. A short summary of the removed criterion is in §5.5.
 
-## 5. Conjugate Gradient MDF Data Flow (HISTORICAL — legacy criterion)
+## 5. Canonical CONJUGATE_MDF Data Flow
 
-`conjugate_mdf.py` — frequency-domain conjugate gradient with Toeplitz matrix adaptation.
-Works on pre-transformed frequency-domain inputs (no internal overlap-save).
+`conjugate_mdf.py` — the classic partitioned-block MDF (Lee & Chang):
+`[0;e]` criterion + normalized gradient + G-projection. Works on
+pre-transformed frequency-domain inputs (no internal overlap-save);
+`FD_NLMS` in the same module is the identical geometry with an
+instantaneous gradient (`beta=0` reproduces it exactly, 1.6e-16).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  Conjugate Gradient MDF apply(Y, Y_rx) — COMPLETE FRAME PROCESSING         │
+│  CONJUGATE_MDF.apply(Y, Y_rx) — ONE FRAME                                   │
 │                                                                             │
-│  INPUT: Y [NBIN, NCHAN] (mic), Y_rx [NBIN, Nrxref] (reference)           │
-│         (already in frequency domain from external FFT)                     │
+│  INPUT: Y [NBIN, NCHAN] (mic), Y_rx [NBIN, Nrxref] (reference)              │
+│         (already FULL L-sample frame FFTs from the external wrapper)        │
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
-│  STEP 1: BUFFER UPDATE                                                     │
+│  STEP 1: REGRESSOR BUFFER (reference frames only; mic is not buffered)     │
 │  ═══════════════════════════════════════════════════════════                │
 │                                                                             │
-│  buf_Y_rx = roll(buf_Y_rx, -1, axis=1)     # shift reference buffer       │
+│  buf_Y_rx = roll(buf_Y_rx, -1, axis=1)     # shift lag buffer              │
 │  buf_Y_rx[:, -1, :] = Y_rx                   # insert new frame at end     │
+│  rx_flipped = flip(buf_Y_rx, axis=1)         # index j = frame lag          │
 │                                                                             │
-│  buf_Y = roll(buf_Y, -1, axis=1)            # shift mic buffer            │
-│  buf_Y[:, -1, :] = Y                          # insert new frame at end    │
-│                                                                             │
-│  Buffer layout: [NBIN, N_G, NCHAN/Nrxref]                                 │
-│    axis 0: frequency bins                                                   │
-│    axis 1: time partitions (0=newest, N_G-1=oldest)                        │
-│    axis 2: channels                                                         │
+│  Buffer layout: [NBIN, N_G, Nrxref]                                         │
+│    axis 0: frequency bins (NBIN = L/2+1)                                    │
+│    axis 1: time partitions (0 = oldest … N_G-1 = newest after flip)        │
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
-│  STEP 2: FILTERING (with w_last, previous iteration's weights)             │
+│  STEP 2: A PRIORI ESTIMATE + THE [0;e] ERROR                                │
 │  ═══════════════════════════════════════════════════════════                │
 │                                                                             │
-│  rx_flipped = flip(buf_Y_rx, axis=1)       # reverse: oldest first        │
-│  micest = Σ_p w_last[p] * rx_flipped[p]    # echo estimate per bin        │
-│  output = Y - micest                        # error signal                 │
-│  e = output.copy()                                                         │
+│  est     = Σ_j w_last[j] (.) rx_flipped[j]   # estimate with OLD weights    │
+│  R       = Y - est                           # full-frame residual spectrum │
+│  e_tail  = irfft(R)[L-hop:]                  # residual of the NEW block    │
+│  E_zh    = rfft([ zeros(L-hop) ; e_tail ])   # zero-headed error [0;e]      │
+│  E_upd   = R  if full_frame_error else E_zh  # ablation flag (§7.4)         │
+│                                                                             │
+│  ─── THE CRITERION: the update grades ONLY the new block. The overlap-save │
+│      head (circular wrap) never biases the weights — this is the cliff fix.│
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
-│  STEP 3: CORRELATION UPDATE (accumulate statistics)                        │
+│  STEP 3: REFERENCE-EXCITATION GATE                                          │
 │  ═══════════════════════════════════════════════════════════                │
 │                                                                             │
-│  For each reference channel iref:                                           │
-│    new_R1    = conj(rx_flipped) * Y_rx       # autocorrelation contribution │
-│    autoR[iref]  += α * new_R1                # accumulate                   │
-│                                                                             │
-│    new_cross = conj(rx_flipped) * Y          # cross-correlation           │
-│    rcross[iref] += α * new_cross             # accumulate                  │
-│                                                                             │
-│    autoR[iref] *= β                          # forgetting factor            │
-│    rcross[iref] *= β                         # forgetting factor            │
-│                                                                             │
-│  BOTH correlations conjugate the regressor (reference) side — the          │
-│  y = Σ_j w_j·X(t−j) convention whose normal equations are                  │
-│  toeplitz(autoR)·w = rcross with:                                           │
-│    autoR[k,p]  ≈ Σ_n β^(N-n)·conj(X[n-p])·X[n]   (autocorrelation)         │
-│    rcross[k,p] ≈ Σ_n β^(N-n)·conj(X[n-p])·Y[n]   (cross-correlation)       │
-│  Conjugating only one of the two mixes Hermitian conventions and           │
-│  yields w = T⁻¹·conj(T)·w_true (identity-probe verified 2026-09-23).       │
-│  Both buffers init to ZERO (consistent relation; silence self-gates).      │
+│  adapt only while  P_ref > gate_rel·P_mic  AND  P_ref > gate_floor·P_run   │
+│  (P_run = decaying running peak; gate_hold frames of hysteresis).           │
+│  Covers reverb ring-down, digital silence, double talk. Ratio-based —       │
+│  a pure level threshold cannot separate quiet speech from a reverb pause.   │
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
-│  STEP 4: CG ADAPTATION (per frequency bin)                                 │
+│  STEP 4: GRADIENT AVERAGING + NORMALIZER (per reference channel)            │
 │  ═══════════════════════════════════════════════════════════                │
 │                                                                             │
-│  For each frequency bin k:                                                  │
-│    r_vec = autoR[k, :]                       # autocorrelation vector      │
-│    T = toeplitz(r_vec)                       # build Toeplitz matrix       │
-│                                                                             │
-│    For each microphone channel:                                             │
-│      g = rcross[k, :] - T @ w_last[k, :]    # gradient (residual)         │
-│      p = g                                    # search direction            │
-│      num = 0.999 · (p^H · g)                                               │
-│      den = p^H · T · p                                                     │
-│      if den.real > 0 and |den| > 1e-30:   # positive-curvature guard      │
-│          α = num / den                       # (else α = 0: self-gates    │
-│      w[k, :] = w_last[k, :] + α * p          #  in silence / indefinite T)│
-│                                                                             │
-│  Optional G = [I_M, 0] tap constraint (Table 2 / PAES; tap_constraint     │
-│  parameter, default off): after the sweep, irfft each partition weight,   │
-│  zero taps ≥ K, rfft back — confines weights to the causal partition      │
-│  family. See §7 for why this alone is not sufficient.                     │
+│  gacc = β·gacc + conj(rx_flipped) (.) E_upd   # decay-first averaging       │
+│  Pn   = β·Pn + (1-β)·Σ_j |rx_flipped|²        # smoothed per-bin power      │
+│  (gate closed: gacc only decays — the stale gradient fades out)             │
 │                                                                             │
 │  ═══════════════════════════════════════════════════════════                │
-│  STEP 5: RE-FILTER (with updated weights)                                  │
+│  STEP 5: NORMALIZED UPDATE + G-PROJECTION (per bin, gate open)              │
 │  ═══════════════════════════════════════════════════════════                │
 │                                                                             │
-│  micest = Σ_p w[p] * rx_flipped[p]          # new echo estimate           │
-│  output = Y - micest                         # updated error               │
-│  w_last = w.copy()                           # save for next frame         │
+│  w[k] = w_last[k] + μ·(1-β)·gacc[k] / (Pn[k] + 1e-10)                       │
+│  (silent bins Pn ≤ 1e-12: weight suspended at w_last)                       │
+│  G-PROJECTION (Lee & Chang eq.10, unconditional):                           │
+│    Wt = irfft(w);  Wt[hop:] = 0;  w = rfft(Wt)                              │
+│  — each partition is a hop-tap causal filter; keeps the frequency           │
+│    products exact linear convolutions.                                      │
 │                                                                             │
-│  OUTPUT: output [NBIN, NCHAN]                                             │
-│    hop mode: the ZERO-HEADED a priori error spectrum rfft([0;e]) —      │
-│    IDENTICAL frame geometry to FD_NLMS (same in, same out; only the     │
-│    weight update differs; verified: max spectrum diff 6e-6 at beta=0).  │
-│    legacy mode: full-frame residual spectrum (historical behaviour).    │
+│  ═══════════════════════════════════════════════════════════                │
+│  STEP 6: OUTPUT + STATE ADVANCE                                             │
+│  ═══════════════════════════════════════════════════════════                │
+│                                                                             │
+│  output = E_zh        # zero-headed A PRIORI error spectrum                 │
+│  self.e  = e_tail     # the hop time samples the wrapper keeps              │
+│  w_last  = w                                                # next frame    │
+│  OUTPUT: rfft([0; e]) — IDENTICAL frame geometry to FD_NLMS                 │
+│  (same buffers, same in/out; only the weight update differs).               │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key difference from PFDAF
 
 ```
-              PFDAF (LMS)                    Conjugate Gradient MDF
-              ───────────                    ──────────────────────
+              PFDAF (LMS)                    CONJUGATE_MDF (canonical)
+              ───────────                    ─────────────────────────
 Input         Time-domain blocks             Frequency-domain frames
               (handles own FFT)              (external FFT)
 
-Adaptation    Normalized gradient:           Toeplitz CG:
-              H += μ·conj(X)·E/(|X|²+ε)     w += α·T⁻¹·(rcross - T·w)
+Adaptation    Normalized gradient:           Normalized gradient with
+              H += μ·conj(X)·E/(|X|²+ε)     β-averaged gradient + gate:
+                                             w += μ(1-β)·gacc/(Pn+ε)
+                                             (β=0 ⇒ exactly FD_NLMS)
 
-Memory        Instantaneous power            Accumulated correlations
-              (forgets after 1 block)        (exponential window via β)
+Error         e*window, full frame           [0;e] — new block only
+                                             (no criterion cliff, §7)
 
-Convergence   ~1/μ blocks                    ~N_G frames (faster)
-Speed         O(N·M)                         O(N_G²·NBIN) per frame
+Constraint    Partial (one partition/frame)  Full G-projection every
+                                             frame (all partitions)
 
-Stability     Always stable                  Needs regularization
-                                             (Toeplitz can be ill-conditioned)
+Memory        Instantaneous power            β-averaged gradient + power
+              (forgets after 1 block)        (exponential window)
+
+Stability     Always stable                  Gate freezes adaptation when
+                                             the reference is not identifiable
 ```
+
+### 5.5 Historical: the removed legacy criterion (summary)
+
+The pre-2026-10-01 class accumulated full-frame correlations
+(`autoR`, `rcross` — both conjugated on the regressor side, the
+`y = Σ w_j·X(t−j)` convention) and took per-bin CG steps on the
+Toeplitz system `toeplitz(autoR)·w = rcross` with a positive-curvature
+guard. Its criterion graded the WHOLE frame (head included), which is
+exactly the cliff condition of §7.3 — the reason it was removed. The
+full-frame mode is preserved as the `full_frame_error=True` ablation
+flag (§7.4); the complete Toeplitz-CG machinery is in git `2f23d9d`.
 
 ---
 
@@ -473,7 +471,12 @@ Stability     Always stable                  Needs regularization
   • Simple, stable, but slow convergence
 ```
 
-### Strategy 2: Toeplitz CG (Conjugate Gradient MDF)
+### Strategy 2: Toeplitz CG (the REMOVED legacy criterion — historical)
+
+> Removed from `conjugate_mdf.py` on 2026-10-01 (git `2f23d9d`): its
+> full-frame criterion is the cliff condition (§7.3). Kept here as the
+> algorithm survey; the current CONJUGATE_MDF uses Strategy 1's update
+> with β-averaging (§5).
 
 ```
                     ┌─────────────────────────────────────┐
@@ -517,7 +520,10 @@ Stability     Always stable                  Needs regularization
   • Toeplitz structure allows O(N²) solve (vs O(N³) for general matrix)
 ```
 
-### Strategy 3: Conjugate Gradient (PFDKF-CG)
+### Strategy 3: Conjugate Gradient (PFDAF-CG, `pfdaf_cg.py` — NOT WIRED)
+
+> Status: `pfdaf_cg.py` crashes at init (missing `d_old`/`D` state) and is
+> not used by any test; kept for reference only.
 
 ```
                     ┌─────────────────────────────────────┐
@@ -650,18 +656,19 @@ it; it only costs more frames per second.
 
 **Criterion-only A/B (scratch_classic_criterion.py, delay 800, identical
 pair-window geometry and regressors):** classic `[0;e]` criterion (error on
-the new block only — what standard FDAF/FBLMS/MDF, e.g. the original
-`echo_canceller_fdaf_apa_vss` rig, computes): optimum ≥ 288.7 dB. Full-frame
-per-bin criterion (what `CONJUGATE_MDF`'s correlations encode): 10.3 dB.
-Same data, same frames, same weights available — only the objective differs.
+the new block only — what standard FDAF/FBLMS/MDF computes): optimum ≥
+288.7 dB. Full-frame per-bin criterion (what `CONJUGATE_MDF`'s correlations
+encode): 10.3 dB. Same data, same frames, same weights available — only the
+objective differs.
 
 ### 7.4 Fixes
 
 | Route | What | Status |
 |---|---|---|
-| **CONJUGATE_MDF** (current; canonical-only since 2026-10-01) | the classic `[0;e]` MDF — exact valid-region gradient, FD-NLMS normalization (`mu`, `beta`=gradient averaging), G-constraint built in, reference-excitation gate. No mode switch: `hop` is a plain required parameter; the legacy full-frame criterion and its plumbing were removed at user request (recoverable from git `2f23d9d`) | **implemented & PASS**: canonical pair **23.77 dB / corr 0.9982**; noise oracle 43.2 dB with the true path learned exactly; cliff check 45.2/44.3 dB at delays 640/800 (no gap); `beta=0` ≡ FD_NLMS **exactly** (1.6e-16) |
+| **CONJUGATE_MDF** (current; canonical-only since 2026-10-01) | the classic `[0;e]` MDF — exact valid-region gradient, FD-NLMS normalization (`mu`, `beta`=gradient averaging), G-constraint built in, reference-excitation gate. No mode switch: `hop` is a plain required parameter; the legacy full-frame criterion was removed at user request (recoverable from git `2f23d9d`) and survives only as the `full_frame_error=True` ablation flag (added 2026-10-01, output geometry unchanged) | **implemented & PASS**: canonical pair **23.77 dB / corr 0.9982**; noise oracle 43.2 dB with the true path learned exactly; cliff check 45.2/44.3 dB at delays 640/800 (no gap); `beta=0` ≡ FD_NLMS **exactly** (1.6e-16) |
 | Table 2 / PAES constrained criterion | full Table-2 machinery (circulant D_T from truncated rg + G̃-wrapped products, kmax>1, Polak-Ribière) — the deeper CG structure on top of the same valid-region criterion | future work on top of hop mode |
-| Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in conjugate_mdf.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged), vs CG-MDF legacy 9-10 dB saturated; the `full_frame_error=True` ablation of the SAME class cliffs (13 dB) — the convention is the sole variable |
+| Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in conjugate_mdf.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged); the `full_frame_error=True` ablation of the SAME class cliffs — canonical pair 5.40 dB vs 23.77, synthetic delay-800 13.0 vs 44.3 (results/2026-10-01_hop-ablation/) |
+| Unconstrained FDAF (no G-projection; Mansour & Gray UFLMS) | `--no-constraint` (FD_NLMS) — skip the per-partition irfft/rfft projection | **no cliff, and +2.4 dB on the canonical pair (26.16 vs 23.77)**: each partition keeps its wrap taps, which add sub-hop delay freedom; weights are no longer hop-tap causal filters |
 | Sample-domain engine | NLMS / time-domain CG: no windowing → no cliff | NLMS reaches the 49 dB oracle ceiling |
 | Hop-aligned data | delays that are multiples of M | exact even now (~300 dB) |
 
@@ -681,11 +688,18 @@ Same data, same frames, same weights available — only the objective differs.
 
 ## 8. Echo Path Generation and Verification
 
-### Generation Flow
+Two generators exist; do not mix them up:
+
+| generator | path shape | output pair | used by |
+|---|---|---|---|
+| `create_test_files.py` | **single tap**: 50 ms delay (800 samples), decay 0.4 | `audio/reference.wav` + `audio/microphone.wav` (~10 s speech) | `test_subband_echo_cancellation.py` (the official pair, §10) |
+| `harness_template/ground_truth/generators.py` | **room model**: direct + early reflections + late reverb (RoomParameters below) | `ground_truth_reference.wav` + `ground_truth_microphone.wav` + true path | `test_echo_path_comparison.py` |
+
+### Room-path generation flow (`generate_room_echo_signals`)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  test_subband_echo_cancellation.py → create_echo() / LibriSpeech sample   │
+│  test_echo_path_comparison.py → ground_truth/generators.py               │
 │                                                                          │
 │  RoomParameters:                                                         │
 │    sampling_rate  = 16000 Hz                                            │
@@ -793,14 +807,15 @@ Same data, same frames, same weights available — only the objective differs.
   ───────────                    ────────────────               ───────────
 
   ref[n] ──→ ┌──────────────────────────────────────────────┐
-             │  CGMDF (test_subband_echo_cancellation)      │
+             │  CGMDF / FDNLMS (test_subband_echo_cancellation) │
+             │  (identical wrapper; CLI keys 'cgmdf'/'fdnlms')  │
              │                                              │
              │  ┌─────────────┐    ┌─────────────────┐      │
   x_block ──→│  │  rfft(x)    │───→│                 │      │
   (fft_size) │  │  → X[k]     │    │  CONJUGATE_MDF  │      │
              │  └─────────────┘    │  .apply(D, X)   │      │
-  d_block ──→│  ┌─────────────┐    │                 │      │
-  (fft_size) │  │  rfft(d)    │───→│  Returns E[k]   │      │
+  d_block ──→│  ┌─────────────┐    │  (or FD_NLMS —  │      │
+  (fft_size) │  │  rfft(d)    │───→│  same geometry) │      │
              │  │  → D[k]     │    │                 │      │
              │  └─────────────┘    └────────┬────────┘      │
              │                              │                │
@@ -827,8 +842,9 @@ Same data, same frames, same weights available — only the objective differs.
     Input:  fft_size = 512 samples (with 75% overlap from previous)
     Output: step = 128 valid samples
 
-  Total frames for 10s at 16kHz:
-    n_frames = (160000 - 512) / 128 + 1 ≈ 1246 frames
+  Total frames for the 10 s canonical pair at 16 kHz
+  (the wrapper loop advances by `step`, head = fft_size − step):
+    n_frames = (160000 − 384) // 128 = 1247 frames
 ```
 
 ### Debug Funnel (When Things Go Wrong)
@@ -863,8 +879,10 @@ Same data, same frames, same weights available — only the objective differs.
   │  │  │  │  contaminates the fit when   │        │      │       │
   │  │  │  │  r = delay mod M ≠ 0         │        │      │       │
   │  │  │  │                              │        │      │       │
-  │  │  │  │  FIX: Table-2 valid-region   │        │      │       │
-  │  │  │  │  (truncated) correlations,   │        │      │       │
+  │  │  │  │  FIX (implemented, §7.4):    │        │      │       │
+  │  │  │  │  the [0;e] criterion —       │        │      │       │
+  │  │  │  │  grade ONLY the new block    │        │      │       │
+  │  │  │  │  (CONJUGATE_MDF / FD_NLMS);  │        │      │       │
   │  │  │  │  or sample-domain engine     │        │      │       │
   │  │  │  │  (NOT "use a bigger FFT" —  │        │      │       │
   │  │  │  │  the cliff is R-independent) │        │      │       │
@@ -892,16 +910,11 @@ G-constraint + excitation gate, official metric):
 | FD_NLMS raw frames | **43.2 dB** | **0.0365 @ 802 — exact** |
 | CG-MDF hop (β=0.3) raw frames | **43.3 dB** | **0.0365 @ 802 — exact** |
 | CG-MDF hop (β=0) | 43.2 dB | ≡ FD_NLMS digit-for-digit |
-| either, Hann frames + WOLA (μ=1) | 36.4 dB | window coordinates |
 
 Reading: the target is exceeded by > 20 dB and the true path is learned
 exactly (amplitude and position) — the overlap-save tail-keep buffer
-processing is fully correct. The Hann-window variant (the matlab/ rig
-lesson applied WITHOUT a filterbank: window on the frames, OLA on the
-output) is stable at μ=1 on white noise — the divergence case is
-spectral holes in *colored speech* (§9/§7 notes; there, detune to
-μ≈0.1 + a relative normalizer floor) — but costs ~7 dB on flat spectra,
-so raw frames are the recommendation for this class.
+processing is fully correct; raw frames are the recommended configuration
+for this class.
 
 Reproduce: `.venv/Scripts/python scratch_lowpass_compare.py`;
 record: `results/2026-10-01_lowpass-benchmark/`.
@@ -925,6 +938,8 @@ speechlp`; record: `results/2026-10-01_speechlp-benchmark/`.
 | File | Algorithm | See Section |
 |------|-----------|-------------|
 | `pfadf_mdf_cg.py` | PFADF MDF CG | [§4](#4-pfdaf-data-flow-lms-baseline) |
-| `conjugate_mdf.py` | Conjugate Gradient MDF | [§5](#5-conjugate-gradient-mdf-data-flow) |
-| `pfdaf_cg.py` | PFDAF-CG | [§6 Strategy 3](#6-weight-update-strategies) |
-| `test_subband_echo_cancellation.py` | Block wrapper | [§9](#9-test-harness-flow) |
+| `conjugate_mdf.py` | CONJUGATE_MDF (canonical `[0;e]`) + FD_NLMS | [§5](#5-canonical-conjugate_mdf-data-flow), [§7](#7-sub-hop-delays-representation-vs-the-criterion-cliff) |
+| `pfdaf_cg.py` | PFDAF-CG (broken init, not wired) | [§6 Strategy 3](#6-weight-update-strategies) |
+| `test_subband_echo_cancellation.py` | Block wrapper (keys: nlms / fdnlms / cgmdf) | [§9](#9-test-harness-flow) |
+| `run_fdnlms.py` | CLI driver for FD_NLMS / CONJUGATE_MDF A/B runs | [§10](#10-benchmark-50-ms-delay--lowpass-pair-reference-target--20-db) |
+| `test_echo_path_comparison.py` | Shared-harness comparison on the ground-truth room path | [§8](#8-echo-path-generation-and-verification) |

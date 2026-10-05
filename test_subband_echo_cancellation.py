@@ -12,7 +12,7 @@ Outputs (written to the current directory):
 and prints delay estimation, ERLE, band ERLE, echo-estimation correlation and
 learned-path metrics (shared implementations from harness/metrics/).
 
-CLI keys: 'cgmdf' (default; alias 'rls'), 'nlms' (alias 'lms').
+CLI keys: 'cgmdf' (default; alias 'rls'), 'fdnlms', 'nlms' (alias 'lms').
 """
 
 import os
@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from conjugate_mdf import CONJUGATE_MDF
+from conjugate_mdf import CONJUGATE_MDF, FD_NLMS
 from harness.metrics.comparison import (calculate_correlation,
                                         calculate_echo_path_metrics,
                                         calculate_erle)
@@ -79,6 +79,21 @@ class CGMDF:
         return np.fft.irfft(E[:, 0], n=self.fft_size)[-self.step:]
 
 
+class FDNLMS:
+    """FFT-frame wrapper around FD_NLMS — identical buffer/output geometry
+    to CGMDF, instantaneous per-frame NLMS update ([0;e] criterion)."""
+
+    def __init__(self, fft_size=512, step=128, n_g=8, mu=1.0, gate_rel=0.3):
+        self.fft_size, self.step = fft_size, step
+        self.fdn = FD_NLMS(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
+                           mu=mu, hop=step, gate_rel=gate_rel)
+
+    def process(self, x_frame, d_frame):
+        E = self.fdn.apply(np.fft.rfft(d_frame).reshape(-1, 1),
+                           np.fft.rfft(x_frame).reshape(-1, 1))
+        return np.fft.irfft(E[:, 0], n=self.fft_size)[-self.step:]
+
+
 # ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
@@ -104,9 +119,9 @@ def run(algorithm, ref, mic):
             out[i:j] = f.process(ref[i:j], mic[i:j])
         return out, f
 
-    f = CGMDF()
+    f = FDNLMS() if algorithm == 'fdnlms' else CGMDF()
     head = f.fft_size - f.step      # overlap-save: discard contaminated head
-    for i in tqdm(range((len(ref) - head) // f.step), desc='CGMDF'):
+    for i in tqdm(range((len(ref) - head) // f.step), desc=algorithm.upper()):
         s = i * f.step
         out[s + head:s + f.fft_size] = f.process(ref[s:s + f.fft_size],
                                                  mic[s:s + f.fft_size])
@@ -147,8 +162,9 @@ def main(algorithm='cgmdf'):
               f"samples, amplitude error {m['amplitude_error_db']:.1f} dB, "
               f"NMSE {m['nmse_db']:.1f} dB")
     else:
-        w = f.cg.w[0]
-        print(f"CG-MDF |W|: max {np.abs(w).max():.3f}, mean {np.abs(w).mean():.3f}")
+        w = f.cg.w[0] if algorithm != 'fdnlms' else f.fdn.w[0]
+        print(f"{'CG-MDF' if algorithm != 'fdnlms' else 'FD-NLMS'} |W|: "
+              f"max {np.abs(w).max():.3f}, mean {np.abs(w).mean():.3f}")
 
     # ---- artifacts ----
     sf.write(f'processed_signal_{algorithm}.wav', out, sr)

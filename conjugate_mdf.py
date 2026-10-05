@@ -206,20 +206,16 @@ class FD_NLMS:
         X2  = sum_j |X(t-j)|^2                              per bin
         w_j += mu * conj(X(t-j)) * E / (X2 + eps)
         w_j = FFT[first-hop-taps; 0]                        (if constraint)
-
-    full_frame_error=True reproduces the historical head-scoring
-    criterion inside this same class — the controlled ablation that
-    demonstrates the criterion cliff (docs/DATAFLOW.md §7).
     """
 
     __slots__ = ['nchan', 'nbin', 'N_G', 'Nrxref', 'mu', 'hop', 'nfft',
-                 'constraint', 'full_frame_error', 'eps',
+                 'constraint', 'eps',
                  'gate_rel', 'gate_hold', 'gate_decay', 'gate_floor',
                  '_Prun', '_hold',
                  'buf_Y_rx', 'w', 'P_X', 'output', 'e', 'X2']
 
     def __init__(self, NCHAN, NBIN, N_G, mu, hop,
-                 Nrxref=1, constraint=True, full_frame_error=False,
+                 Nrxref=1, constraint=True,
                  eps=1e-10, gate_rel=0.3, gate_hold=2, gate_decay=1.5,
                  gate_floor=1e-6):
         self.nchan = NCHAN
@@ -233,7 +229,6 @@ class FD_NLMS:
             raise ValueError("hop must be in (0, nfft/2] "
                              f"(got hop={hop}, nfft={self.nfft})")
         self.constraint = bool(constraint)
-        self.full_frame_error = bool(full_frame_error)
         self.eps = float(eps)
         self.gate_rel = None if gate_rel is None else float(gate_rel)
         self.gate_hold = max(1, int(gate_hold))
@@ -271,13 +266,10 @@ class FD_NLMS:
         R = Y - est
         e_time = np.fft.irfft(R, n=self.nfft, axis=0)[self.nfft - self.hop:]
 
-        # 3. error for the update: [0; e], or the full-frame ablation
-        if self.full_frame_error:
-            E_upd = R
-        else:
-            E_head = np.zeros((self.nfft, self.nchan))
-            E_head[self.nfft - self.hop:] = e_time
-            E_upd = np.fft.rfft(E_head, axis=0)
+        # 3. error for the update: [0; e] — only the new block is graded
+        E_head = np.zeros((self.nfft, self.nchan))
+        E_head[self.nfft - self.hop:] = e_time
+        E_upd = np.fft.rfft(E_head, axis=0)
 
         # 4. normalized update, suspended while the gate is closed
         X2 = np.sum(np.abs(rx_flipped) ** 2, axis=(1, 2))

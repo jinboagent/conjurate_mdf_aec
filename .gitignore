@@ -41,7 +41,7 @@ results/
 .claude/
 matlab/
 scratch_test/
-
+aec/
 *.png
 *.m
 *.txt

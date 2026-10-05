@@ -85,14 +85,12 @@ class FDNLMSAdapter(FreqDomainBlockAdapter):
     """FD_NLMS: classic partitioned-block FDAF baseline ([0;e] + G)."""
 
     def __init__(self, n_g: int = 64, fft_size: int = 512, step: int = 128,
-                 mu: float = 1.0, constraint: bool = True,
-                 full_frame_error: bool = False, gate_rel=0.3):
+                 mu: float = 1.0, constraint: bool = True, gate_rel=0.3):
         from conjugate_mdf import FD_NLMS
         super().__init__(
             fft_size, step, n_g,
             lambda: FD_NLMS(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
                             mu=mu, hop=step, constraint=constraint,
-                            full_frame_error=full_frame_error,
                             gate_rel=gate_rel))
 
 
