@@ -48,6 +48,21 @@ excitation gate against covariance wind-up — direction and stride both exact.
 Details: [docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md)
 and ![the four jobs](docs/autocorr_matrix_roles_en.png).
 
+**Correlation tuning cannot escape the failure** — old class defaults vs the
+full parameter sweep (β, δ, β-method, k_max, reset, geometry all swept;
+d512 probe: RLS run ungated — stationary always-on excitation):
+
+| configuration | canonical | speechlp | d512@4s |
+|---|---|---|---|
+| correlation, old defaults (β=0.97, δ=0.1) | 6.39 | 6.89 | 17.25 |
+| correlation, retuned (β=0.999/1.0, δ=1.0) | 8.92 / 9.13 | 14.2 / 15.1 | 24.7 / 24.9 |
+| correlation, best of sweep (β=1, δ=8) | 9.35 | 15.27 | 26.57 |
+| error gradient (champion CG) | 29.78 | 35.46 | 29.65 |
+| RLS | 44.68 | 46.62 | 69.20 |
+
+Every knob combined is worth +3 dB — the direction itself points at a moving
+target; no step size fixes that.
+
 Geometry stacks on top of the solver: at hop 128 (8× overlap) the same engines
 reach **RLS 55.30 dB / CG 36.92 dB** on canonical (scratch-verified; wrapper
 still at 1024/256 for benchmark continuity). Dense reverb needs coverage

@@ -148,6 +148,11 @@ description** (details: [autocorr_matrix_methods.md](autocorr_matrix_methods.md)
    noise into a target that **wanders** — damping buys only +0.4 dB because
    smaller steps converge to the same moving point. The fixed point itself is
    fine (frozen exact solve = 45.4 dB!); the *trajectory* is the failure.
+   Tuning trajectory (canonical / speechlp / d512@4s): old defaults
+   (β=0.97, δ=0.1) 6.39 / 6.89 / 17.25 → retuned (β=0.999–1.0, δ=1.0)
+   8.92–9.13 / 14.2–15.1 / 24.7–24.9 → best of sweep (β=1, δ=8)
+   9.35 / 15.27 / 26.57 — against error 29.78 / 35.46 / 29.65 and RLS
+   44.68 / 46.62 / 69.20 (d512 probe: RLS ungated).
 5. **error hybrid (+20 dB over correlation):** swap the direction to the
    instantaneous error gradient, whose expectation is **exactly zero at the
    true path** (there the residual is uncorrelated with the regressor —
