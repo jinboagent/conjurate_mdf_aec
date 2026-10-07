@@ -84,11 +84,31 @@ The table has edges in both directions: hop 64 over-collinearizes the lag
 regressors (16× ratio → the per-bin system degenerates, 6.6 dB), and a short
 window (256/128) starves speech while being near-RLS-fast on the stationary
 probe (67.12). **1024/128 is the sweet spot**, and the gain STACKS with the
-solver: RLS at 1024/128 = **55.30 dB**, at 2048/128 = **64.77 dB** (scratch-
-verified; the official wrapper stays at 1024/256 = 44.68 for benchmark
-continuity). Price: latency nfft−hop (56 ms at 1024/128) and compute ×2 per
-hop halving. Dense reverb needs coverage first: reverb30 (800 ms RIR)
-requires n_g ≥ 32 (RLS 26.31 vs CG 23.85 at n_g=32).
+solver — solver quality and geometry are two independent axes:
+
+| geometry | CG error hybrid | RLS |
+|---|---|---|
+| 1024/256 (wrapper default) | 29.78 | 44.68 |
+| 1024/128 | 36.92 | **55.30** |
+| 2048/128 | 35.68 | **64.77** |
+
+(speechlp at hop 128: CG 40.84, RLS 57.44; 2048/128 → 65.21.)
+
+**More time also helps** — and the *slope* diagnoses the engine. On the
+stationary d512 probe the CG hybrid climbs 29.75 → 36.91 → 42.18 dB at
+4/64/256 s with a slope accelerating toward the 10 dB/decade averaging
+limit: pure slowness, **no misadjustment floor** (RLS runs exactly at
+10.3 dB/decade: 69.2 → 81.8 → 87.9 at 4/64/256 s). On tiled canonical the
+CG hybrid gains +3.3 dB per 4× data (29.78 → 33.85 → 37.08 at 5/20/80 s)
+but would need decades more to reach its own 45.4 dB fixed point, while
+gated RLS is already there at 5 s — the practical meaning of "the champion
+sits at the fixed point". Long-run caution for RLS: WITHOUT the gate it
+wind-ups in speech pauses (44.68 → 26.5) — the gate is the anti-wind-up,
+not an option.
+
+Price of hop 128: latency nfft−hop (56 ms at 1024/128, 112 ms at 2048/128)
+and compute ×2 per hop halving. Dense reverb needs coverage first:
+reverb30 (800 ms RIR) requires n_g ≥ 32 (RLS 26.31 vs CG 23.85 at n_g=32).
 
 ## The two processing machines
 
@@ -103,22 +123,59 @@ frame-wise spectral product is a *circular* convolution whose wrapped head
 must never be graded — the zero-headed **[0;e]** criterion grades only the
 fresh block, and the G projection keeps each partition's impulse response
 causal. Grading the whole frame instead causes the **criterion cliff**
-(5.94 dB vs 23.77 dB measured):
+(5.94 dB vs 23.77 dB measured). Buffer handling per frame (FFT 512 / hop 128):
+
+```
+x[hop] ──► keep 384 old + 128 new samples ──► rfft ──► X        (regressor)
+est_b  = Σ_p W[b,p]·X_b(m−p)              p = 0…N_G−1    (partition lags)
+R      = D − est  ──► e_tail = irfft(R)[−hop:]            (discard the head)
+E_upd  = rfft([0; e_tail])                                (zero-headed error)
+W     += μ·conj(X_p)·E_upd / (X2 + ε)      →  G projection (support ≤ hop)
+output: the fresh e_tail
+```
 
 ![criterion cliff](docs/criterion_cliff.png)
 ![overlap-save head](docs/overlap_save_head.png)
+![head discard](docs/overlap_save_head_discard.png)
+![window placement](docs/window_placement.png)
 
 ### WOLA — the FFT *is* the filterbank
 
 The windowed frame FFT **is** a 513-band filterbank; each bin runs its own
-tiny complex FIR **across subband ticks** (`Ŷ_b[m] = Σ_j w_b[j]·X_b[m−j]`).
-The per-bin error is a scalar formed in the subband domain — a circular-alias
-head is *structurally impossible*, so no [0;e] and no G projection exist.
-Perfect reconstruction comes from the sqrt-Hann analysis/synthesis pair
-(q²-COLA). Note the naming trap: WOLA's synthesis overlap-add is
-*reconstruction*, not the fast-convolution OLA.
+tiny complex FIR **across subband ticks** (`Ŷ_b[m] = Σ_j w_b[j]·X_b[m−j]`,
+m = subband tick = one hop of audio, j = subband lag = one tap). The per-bin
+error is a scalar formed in the subband domain — a circular-alias head is
+*structurally impossible*, so no [0;e] and no G projection exist. Perfect
+reconstruction comes from the sqrt-Hann analysis/synthesis pair (q²-COLA).
+Note the naming trap: WOLA's synthesis overlap-add is *reconstruction*, not
+the fast-convolution OLA.
+
+The full data flow (`conjugate_fb_toeplitz.py`, one hop per tick):
+
+```
+x[hop], d[hop]
+  │  analysis: X = rfft(q · [history ‖ new hop])      q = sqrt-Hann
+  ▼        (nfft 1024 → 513 bins; subband rate = fs/hop)
+buf_X shift register ──► rx[:, j] = X(m−j)            (subband lags j = 0…n_g−1)
+  ▼
+per-bin a priori error   E_b[m] = D_b[m] − Σ_j w_b[j]·X_b[m−j]   ← SCALAR, no head
+  ▼
+┌─ solver (three interchangeable members) ──────────────────────────────────┐
+│ RLS:      K = P·conj(u)/(λ+uᴴPu);  w += K·E;  P ← (P−K·uᴴP)/λ            │
+│           (P = R⁻¹ maintained by Sherman-Morrison; P(0)=I/δ fading       │
+│            loading; gate freezes P and w — the anti-wind-up)             │
+│ CG error: φ ← γφ + (1−γ)·conj(rx)·E;                                        │
+│           α = 0.999⟨g,v⟩/(⟨v,Tv⟩ + δ·P_inst‖v‖²)  — T = toeplitz(autoR)  │
+│           only sizes the stride (the direction is unbiased at the truth) │
+│ CG corr:  g = rcross − T·w  → solves the windowed system T·w = rcross    │
+│           (defines its own target; fails on speech — target wanders)     │
+└───────────────────────────────────────────────────────────────────────────┘
+  ▼
+synthesis: acc += (2/k)·q·irfft(E);  emit the oldest hop   (k = nfft/hop)
+```
 
 ![WOLA has no time folding](docs/wola_folding.png)
+![window placement](docs/window_placement.png)
 
 Full comparison (isomorphism of the multiplication structures, the three
 real difference axes, oversampling conventions):
