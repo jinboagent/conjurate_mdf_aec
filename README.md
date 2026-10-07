@@ -25,43 +25,95 @@ transient + echo-estimate correlation + learned-path check:
 | `pfcg` | PBFDAF-CG (AES 2006, γ=0.4) | OLS | 26.11 dB | 0.999 | PASS |
 | `fbtoe` | **WOLA FB-Toeplitz + per-bin RLS** | WOLA 1024/256 | **44.68 dB** | **1.0000** | PASS |
 
-### The WOLA solver ladder (same filterbank, three solvers)
+### The WOLA family: three solvers, one filterbank
 
-ERLE on three signals — canonical speech, 30 s lowpassed speech, and a
-stationary white-noise probe with the echo at delay 512 (4 s):
+The same WOLA front end (analysis → per-bin error → synthesis) runs with
+three interchangeable solvers. Signals below: **canonical** = 5 s LibriSpeech
+speech (official pair), **speechlp** = 30 s lowpassed speech, **d512@4s** = a
+stationary white-noise probe with the echo at delay 512.
 
-| solver | canonical | speechlp | d512@4s | role in the story |
-|--------|-----------|----------|---------|-------------------|
-| correlation gradient (best: β=1, δ=8) | 9.35 dB | 15.27 dB | 26.57 dB | FAIL — the windowed system's target wanders every frame |
-| error gradient (Chang-Willson CG, hybrid) | 29.78 dB | 35.46 dB | 29.65 dB | PASS — unbiased direction, matrix demoted to stride |
-| **per-bin RLS** | **44.68 dB** | **46.62 dB** | **69.20 dB** | champion — exact Newton step via a maintained inverse |
+#### 1. Correlation gradient — the windowed-system solver (FAIL)
 
-Why the ladder: the three solvers give the autocorrelation matrix three
-different jobs. **Correlation** lets it *define the target* (`T·w = rcross`)
-— but `rcross` is re-estimated from noisy speech every frame and cond(T) ≈ 220
-amplifies that noise, so the target itself wanders (damping cannot fix a
-moving destination). **Error** makes the direction independent of the matrix
-(the instantaneous error gradient has *zero expectation at the true path*)
-and uses T only to size the stride. **RLS** maintains the exact inverse
-P = R⁻¹ (Sherman-Morrison, negligible at 8 taps) with a fading loading and an
-excitation gate against covariance wind-up — direction and stride both exact.
-Details: [docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md)
-and ![the four jobs](docs/autocorr_matrix_roles_en.png).
-
-**Correlation tuning cannot escape the failure** — old class defaults vs the
-full parameter sweep (β, δ, β-method, k_max, reset, geometry all swept;
-d512 probe: RLS run ungated — stationary always-on excitation):
+Direction = the residual of the windowed normal equations,
+`g = rcross − T·w` with T = toeplitz(autoR) accumulated over a β window: it
+solves `T·w = rcross`, i.e. the matrix **defines the target**. On streaming
+speech `rcross` is re-estimated from recent noisy data every frame and
+cond(T) ≈ 220 (4× geometry) amplifies that noise — the target itself wanders,
+and damping cannot fix a moving destination. Tuning trajectory (all knobs
+swept: β, δ, β-method, k_max, reset, geometry):
 
 | configuration | canonical | speechlp | d512@4s |
 |---|---|---|---|
-| correlation, old defaults (β=0.97, δ=0.1) | 6.39 | 6.89 | 17.25 |
-| correlation, retuned (β=0.999/1.0, δ=1.0) | 8.92 / 9.13 | 14.2 / 15.1 | 24.7 / 24.9 |
-| correlation, best of sweep (β=1, δ=8) | 9.35 | 15.27 | 26.57 |
-| error gradient (champion CG) | 29.78 | 35.46 | 29.65 |
-| RLS | 44.68 | 46.62 | 69.20 |
+| old defaults (β=0.97, δ=0.1) | 6.39 | 6.89 | 17.25 |
+| retuned (β=0.999/1.0, δ=1.0) | 8.92 / 9.13 | 14.2 / 15.1 | 24.7 / 24.9 |
+| **best of sweep (β=1, δ=8)** | **9.35** | **15.27** | **26.57** |
+| *with longer audio* (tiled 20 s, best config) | *14.46* | — | *38.08 @ 64 s* |
 
-Every knob combined is worth +3 dB — the direction itself points at a moving
-target; no step size fixes that.
+Longer audio DOES help it — but only in its one honest regime: stationary +
+on-grid (d512 reaches 38.08 dB at 64 s, beating the CG hybrid there). On
+speech it stays ~30 dB below its own fixed point (the frozen exact solve of
+the same system is 45.4 dB): a trajectory failure, not a system failure.
+Kept as the class default purely as a teaching counterexample.
+
+#### 2. Error gradient — the CG hybrid (PASS, 29.78)
+
+Direction = the γ-averaged **instantaneous** error gradient
+`φ ← γφ + (1−γ)·conj(rx)·E` (Chang-Willson CG1 machinery: Rayleigh line
+search, conjugate-direction memory, η=0.999 damping). The direction is
+**unbiased** — its expectation is exactly zero at the true path, at any
+delay, any window — and T is demoted to the line-search denominator with a
+current-power floor (T only sizes the stride; a wrong T costs speed, never
+accuracy):
+
+| configuration | canonical | speechlp | d512@4s |
+|---|---|---|---|
+| 1024/256 (wrapper default) | 29.78 | 35.46 | 29.65 |
+| **1024/128 (hop halved)** | **36.92 (+7.1)** | **40.84 (+5.4)** | 31.85 |
+| 2048/128 | 35.68 | 41.20 | 36.54 |
+
+| longer audio (1024/256) | canonical | d512 probe |
+|---|---|---|
+| 5 s → 20 s → 80 s (tiled) | 29.78 → 33.85 → **37.08** | — |
+| 4 s → 16 s → 64 s → 256 s (d512) | — | 29.75 → 32.98 → 36.91 → **42.18** |
+
+The time-slope is diagnostic: the d512 climb accelerates toward the
+10 dB/decade averaging limit (5.4 → 8.7 dB/dec measured) — pure slowness,
+**no misadjustment floor**. But it is ~6 orders of magnitude slower than RLS
+to any given depth: at 80 s it is still 8 dB below its own 45.4 dB fixed
+point. Robustness (δ=1 floor, k_max=1) traded for speed is this family's
+structural cost — every acceleration knob measured (δ<1, k_max>1, fading
+loading) makes it worse or diverges.
+
+#### 3. Per-bin RLS — the champion (44.68)
+
+Each bin maintains the exact inverse Gram P = R⁻¹ by Sherman-Morrison rank-1
+(O(n_g²) per bin — negligible at 8 taps), P(0) = I/δ fading loading, λ=0.999
+forgetting; the update `w += K·ξ` is an exact Newton step — best direction
+and best stride at once:
+
+| configuration | canonical | speechlp | d512 probe (ungated) |
+|---|---|---|---|
+| 1024/256 (official wrapper) | **44.68** | **46.62** | 69.20 @4 s |
+| 1024/128 (scratch) | 55.30 | 57.44 | — |
+| 2048/128 (scratch) | 64.77 | 65.21 | — |
+
+| longer audio (d512 probe, ungated) | 4 s | 16 s | 64 s | 256 s |
+|---|---|---|---|---|
+| ERLE (dB) | 69.18 | 75.61 | 81.77 | **87.86** |
+
+RLS runs exactly at the 10.3 dB/decade averaging limit — gated RLS is already
+**at** the windowed-LS fixed point by 5 s on canonical (what "champion"
+means in practice). Two cautions: WITHOUT the excitation gate it wind-ups
+during speech pauses (P ← P/λ inflation; 44.68 → 26.5) — the gate is the
+anti-wind-up, not an option; and dense reverb needs coverage first
+(reverb30: n_g ≥ 32, where RLS leads 26.31 vs 23.85).
+
+Why this ordering — the three solvers give the autocorrelation matrix three
+different jobs (define-the-target / stride-only / exact-inverse); the
+form is innocent (‖R−T‖/‖R‖ = 0.37%, frozen T-solve = 45.4 dB ≈ RLS 46.7).
+Details and the four update rules side by side:
+[docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md) and
+![the four jobs](docs/autocorr_matrix_roles_en.png).
 
 ### Geometry: hop and nfft are first-order knobs
 
