@@ -17,13 +17,20 @@ Official suite — `test_subband_echo_cancellation.py`, canonical pair
 (50 ms delay, 0.40 gain, LibriSpeech speech, 5 s), metric = ERLE after a 1 s
 transient + echo-estimate correlation + learned-path check:
 
+All five keys run through the same driver; the `fbtoe` family (one class,
+`conjugate_fb_toeplitz.py`) contributes **three interchangeable solvers** —
+selected by two constructor switches, `solver='rls'|'cg'` and (within CG)
+`gradient='error'|'correlation'`:
+
 | key | engine | machine | ERLE | corr | status |
 |-----|--------|---------|------|------|--------|
 | `nlms` | time-domain NLMS (per-sample) | — | 22.27 dB | 0.997 | PASS |
 | `fdnlms` | FD_NLMS (OLS, [0;e] + G) | OLS 512/128 | 23.77 dB | 0.998 | PASS |
 | `cgmdf` | FD_NLMS **β=0** (≡ fdnlms; β=0.3 → 24.47 dB via run_fdnlms) | OLS 512/128 | 23.77 dB | 0.998 | PASS |
 | `pfcg` | PBFDAF-CG (AES 2006, γ=0.4) | OLS | 26.11 dB | 0.999 | PASS |
-| `fbtoe` | **WOLA FB-Toeplitz + per-bin RLS** | WOLA 1024/256 | **44.68 dB** | **1.0000** | PASS |
+| `fbtoe` (solver=`'rls'`) | **FB-Toeplitz per-bin RLS** — official wrapper config | WOLA 1024/256 | **44.68 dB** | **1.0000** | PASS |
+| — (solver=`'cg'`, gradient=`'error'`) | FB-Toeplitz CG error-hybrid | WOLA 1024/256 | 29.78 dB | 0.9995 | PASS (scratch) |
+| — (solver=`'cg'`, gradient=`'correlation'`) | FB-Toeplitz CG correlation | WOLA 1024/256 | 9.35 dB best | — | FAIL (scratch; class default = teaching counterexample) |
 
 ### The WOLA family: three solvers, one filterbank
 
@@ -251,11 +258,19 @@ rig principle: ![rig buffer + fold](docs/osfb_analysis_buffer.png).
 
 ## Algorithms
 
-| engine | file | machine | solver | note |
-|--------|------|---------|--------|------|
-| **FD_NLMS** | `FD_NLMS.py` | OLS 512/128 | instantaneous NLMS; `beta>0` = gradient averaging (the former CONJUGATE_MDF, merged bit-exact); `rho` proportionate; `preemph` in-class whitening | canonical [0;e] engine |
-| **PBFDAF-CG** | `pfdaf_cg.py` | OLS | γ-averaged error gradient + per-bin Gram + CG (k_max=1 in streaming) | fastest OLS on long signals |
-| **FB-Toeplitz** | `conjugate_fb_toeplitz.py` | WOLA 1024/256 | `solver='rls'` (champion) or `'cg'` with `gradient='error'`/`'correlation'` | the filterbank family |
+| engine | file | invocation | note |
+|--------|------|------------|------|
+| **FD_NLMS** | `FD_NLMS.py` | `FD_NLMS(...)` ; `beta>0` = gradient averaging (the former CONJUGATE_MDF, merged bit-exact); `rho` proportionate; `preemph` in-class whitening | canonical [0;e] engine |
+| **PBFDAF-CG** | `pfdaf_cg.py` | `PFDAF_CG(...)` — γ-averaged error gradient + per-bin Gram + CG (k_max=1 in streaming) | fastest OLS on long signals |
+| **FB-Toeplitz RLS** ★ | `conjugate_fb_toeplitz.py` | `CONJUGATE_FB_TOEPLITZ(solver='rls', delta=0.1, lam=0.999)` | **champion 44.68** — per-bin exact Newton; gate = anti-wind-up (mandatory) |
+| **FB-Toeplitz CG error** | `conjugate_fb_toeplitz.py` | `CONJUGATE_FB_TOEPLITZ(solver='cg', gradient='error', delta=1.0, gamma=0.1)` | 29.78 — unbiased direction, T sizes the stride only |
+| **FB-Toeplitz CG correlation** | `conjugate_fb_toeplitz.py` | `CONJUGATE_FB_TOEPLITZ(solver='cg', gradient='correlation', beta=1.0, delta=8)` | ≤ 9.35 — solves the windowed system; target wanders on speech. **The bare constructor's DEFAULT — pass solver/gradient explicitly** |
+
+The three FB-Toeplitz variants share one class: the WOLA front end (analysis
+window → subband shift register → per-bin scalar error → synthesis OLA) and
+the gate are identical; only the adaptation step differs (see
+[docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md) for the
+three update rules side by side).
 
 Removed engines (measurements archived in
 `results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md` and
