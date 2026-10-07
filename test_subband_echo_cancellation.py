@@ -12,7 +12,9 @@ Outputs (written to the current directory):
 and prints delay estimation, ERLE, band ERLE, echo-estimation correlation and
 learned-path metrics (shared implementations from harness/metrics/).
 
-CLI keys: 'cgmdf' (default; alias 'rls'), 'fdnlms', 'pfcg', 'nlms' (alias 'lms').
+CLI keys: 'cgmdf' (default; alias 'rls'), 'fdnlms', 'pfcg', 'nlms' (alias 'lms'),
+    'fbtoe' (WOLA filterbank + per-bin RLS solver, OSFB geometry
+    nfft 1024 / hop 256 = 4x oversampled, 513 bins).
 """
 
 import os
@@ -25,7 +27,8 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from conjugate_mdf import CONJUGATE_MDF, FD_NLMS
+from FD_NLMS import FD_NLMS
+from conjugate_fb_toeplitz import CONJUGATE_FB_TOEPLITZ
 from pfdaf_cg import PFDAF_CG
 from harness.metrics.comparison import (calculate_correlation,
                                         calculate_echo_path_metrics,
@@ -68,11 +71,10 @@ class CGMDF:
     FD_NLMS's instantaneous update)."""
 
     def __init__(self, fft_size=512, step=128, n_g=8, mu=1.0, beta=0.0,
-                 bin_skip=0, gate_rel=0.3):
+                 gate_rel=0.3):
         self.fft_size, self.step = fft_size, step
-        self.cg = CONJUGATE_MDF(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
-                                hop=step, mu=mu, beta=beta,
-                                bin_skip=bin_skip, gate_rel=gate_rel)
+        self.cg = FD_NLMS(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
+                          mu=mu, hop=step, beta=beta, gate_rel=gate_rel)
 
     def process(self, x_frame, d_frame):
         E = self.cg.apply(np.fft.rfft(d_frame).reshape(-1, 1),
@@ -114,9 +116,37 @@ class PFCG:
         return np.fft.irfft(E[:, 0], n=self.fft_size)[-self.step:]
 
 
-# ---------------------------------------------------------------------------
-# Test
-# ---------------------------------------------------------------------------
+class FBTOE:
+    """WOLA filterbank + per-bin RLS solver (conjugate_fb_toeplitz,
+    solver='rls') at the OSFB rig geometry: nfft 1024, hop 256 = 4x
+    oversampled, 513 bins, sqrt-Hann q^2-COLA prototype. Time-block API:
+    hop-sized blocks in, hop-sized residual out; the class owns its
+    analysis windows (no [0;e] head, no overlap-save). Intrinsic WOLA
+    latency = nfft - hop = 768 samples — run()'s driver branch keeps the
+    output stream aligned.
+    Recipe (2026-10-06): per-bin exponentially-windowed RLS — exact
+    recursive Newton step per bin. Dissection verdict: the Toeplitz
+    projection is innocent (|T-R|/R| = 0.4%, frozen exact solve of the
+    T system = 45.4 dB = RLS); RLS wins on TRAJECTORY quality — its
+    P(0) = I/delta fading loading + recursive smoothing survive the
+    low-excitation stretches where per-frame exact re-solve swings
+    wildly (w jumps 0.5-0.95 -> stream ERLE 8.5) and where the CG
+    one-step is merely slow (29.8). delta = 0.1 is the RLS loading
+    scale P(0) = I/delta; lambda = 0.999 forgetting (62 ms effective
+    window); gate freezes P and w."""
+
+    def __init__(self, nfft=1024, hop=256, n_g=8, beta=0.999, delta=0.1,
+                 lam=0.999, gate_rel=0.3):
+        self.fft_size, self.step = nfft, hop
+        self.aec = CONJUGATE_FB_TOEPLITZ(nfft=nfft, hop=hop, n_g=n_g,
+                                         beta=beta, delta=delta, lam=lam,
+                                         solver='rls',
+                                         gate_rel=gate_rel)
+
+    def process(self, x_block, d_block):
+        return self.aec.process(x_block, d_block)
+
+
 
 def estimate_echo(ref, mic, sr):
     """Delay and gain of the mic signal w.r.t. the reference (FFT cross-correlation)."""
@@ -137,6 +167,22 @@ def run(algorithm, ref, mic):
         for i in tqdm(range(0, len(ref), CHUNK), desc='NLMS'):
             j = min(i + CHUNK, len(ref))
             out[i:j] = f.process(ref[i:j], mic[i:j])
+        return out, f
+
+    if algorithm == 'fbtoe':
+        # WOLA filterbank family: time-block API with intrinsic causal
+        # latency (nfft - hop). The class emits block i's residual at
+        # call i + nfft/hop - 1, so the driver writes it back at the
+        # input position it belongs to (stream aligned; the first
+        # nfft-hop samples stay zero, inside the skipped transient).
+        f = FBTOE()
+        hop = f.step
+        lag = f.fft_size // hop - 1
+        for i in tqdm(range(len(ref) // hop), desc=algorithm.upper()):
+            blk = f.process(ref[i*hop:(i+1)*hop], mic[i*hop:(i+1)*hop])
+            j = i - lag
+            if j >= 0:
+                out[j*hop:(j+1)*hop] = blk
         return out, f
 
     f = {'fdnlms': FDNLMS, 'pfcg': PFCG}.get(algorithm, CGMDF)()
@@ -181,6 +227,13 @@ def main(algorithm='cgmdf'):
               f"(true {gain:.2f} @ {delay}); delay error {m['delay_error_samples']} "
               f"samples, amplitude error {m['amplitude_error_db']:.1f} dB, "
               f"NMSE {m['nmse_db']:.1f} dB")
+    elif algorithm == 'fbtoe':
+        w = f.aec.w                              # [nbin, n_g] subband weights
+        lag_energy = np.linalg.norm(np.abs(w), axis=0)
+        peak_lag = int(np.argmax(lag_energy))
+        print(f"{algorithm.upper()} |W|: max {np.abs(w).max():.3f}, "
+              f"mean {np.abs(w).mean():.3f}; partition-lag energies peak at "
+              f"lag {peak_lag} (delay {delay} = lag {delay / f.step:.2f})")
     else:
         eng = {'cgmdf': 'CG-MDF', 'fdnlms': 'FD-NLMS', 'pfcg': 'PFDAF-CG'}
         core = f.cg if algorithm in ('cgmdf', 'pfcg') else f.fdn

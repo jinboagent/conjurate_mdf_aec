@@ -29,7 +29,7 @@ Process the generated signals with your echo cancellation algorithm:
 
 ```python
 import soundfile as sf
-from conjugate_mdf import RLSBishengMDF
+from FD_NLMS import FD_NLMS   # (doc predates renames: RLSBishengMDF -> FD_NLMS)
 
 # Load signals
 ref, sr = sf.read('reference.wav')
@@ -88,7 +88,7 @@ The echo path comparison is integrated with the test harness via `test_echo_path
 ```python
 import numpy as np
 import soundfile as sf
-from conjugate_mdf import RLSBishengMDF
+from FD_NLMS import FD_NLMS   # (doc predates renames: RLSBishengMDF -> FD_NLMS)
 
 # 1. Load test signals
 ref, sr = sf.read('reference.wav')

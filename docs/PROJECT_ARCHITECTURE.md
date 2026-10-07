@@ -27,22 +27,34 @@ This project implements and compares frequency-domain adaptive filtering algorit
 ```
                     Frequency Domain Adaptive Filters
                               │
-              ┌───────────────┼───────────────┐
-              │               │               │
-         Partitioned-Block   canonical MDF      PBFDAF-CG
-         (MDF style)        ([0;e] + beta avg)  (AES 2006)
-              │               │               │
-    pfadf_mdf_cg.py    conjugate_mdf.py    pfdaf_cg.py
-    (Normalized grad)  (Normalized grad)   (Gram line-search CG)
-```
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+  Overlap-Save family        canonical MDF          PBFDAF-CG
+  (FDAF baselines)          ([0;e] + beta avg)     (AES 2006)
+        │                     │                     │
+  conjugate_mdf.py       conjugate_mdf.py       pfdaf_cg.py
+  (instantaneous grad)   (beta option = the former
+                          CONJUGATE_MDF, merged 2026-10-06)
+        │
+        │  + WOLA filterbank family (second machine, 2026-10-06)
+        │
+  conjugate_fb_toeplitz.py
+  (per-bin RLS/CG, key fbtoe — champion)
 
 ### Algorithm Descriptions
 
 | Algorithm | File | Adaptation | Partitions | Use Case |
 |---|---|---|---|---|
-| **PFADF MDF CG** | `pfadf_mdf_cg.py` | Normalized gradient | N blocks | Stable + sub-partition delay |
-| **CONJUGATE_MDF** | `conjugate_mdf.py` | Normalized gradient + beta-averaging + gate | N blocks | Reference implementation, cliff-free |
-| **PBFDAF-CG** | `pfdaf_cg.py` | CG direction on averaged gradient + Gram line search | N blocks | Fastest on longer signals |
+| **FD_NLMS** | `conjugate_mdf.py` | Normalized [0;e] gradient | N blocks | Classic FDAF baseline |
+| **FD_NLMS (β option)** | `conjugate_mdf.py` | Instantaneous gradient; β>0 = gradient averaging (the former CONJUGATE_MDF, merged bit-exact 2026-10-06) + gate | N blocks | Reference implementation, cliff-free |
+| **PBFDAF-CG** | `pfdaf_cg.py` | CG direction on averaged gradient + Gram line search | N blocks | Fast on longer signals |
+| **FB-Toeplitz (RLS)** | `conjugate_fb_toeplitz.py` | Per-bin exponentially-windowed RLS in a WOLA filterbank | n_g subband taps/bin | **Champion — 44.68 dB** |
+| **FB-Toeplitz (CG)** | `conjugate_fb_toeplitz.py` | Per-bin CG, error-gradient direction + Toeplitz curvature | n_g subband taps/bin | Runner-up (29.78), teaching A/B |
+| **WOLA-NLMS** | ~~`conjugate_full.py`~~ | removed 2026-10-06 (10.66 dB; NLMS baseline covered by FD_NLMS) | — | — |
+
+Note: the legacy full-frame `conjugate_toeplitz.py` (criterion-cliff
+counterexample, 5.94 dB) was removed 2026-10-06 — code lives at git `2f23d9d`.
+Theory: `docs/wola_vs_overlapsave.md`, `docs/autocorr_matrix_methods.md`.
 
 ## 3. Data Flow
 
@@ -143,14 +155,15 @@ Echo paths can be generated using the `create_test_files.py` script, which creat
 ### Core Algorithms
 | File | Class/Function | Description |
 |---|---|---|
-| `conjugate_mdf.py` | `CONJUGATE_MDF`, `FD_NLMS` | Canonical [0;e] MDF + classic FDAF baseline (same geometry) |
+| `FD_NLMS.py` | `FD_NLMS` | Canonical [0;e] MDF with the β gradient-averaging option (absorbed CONJUGATE_MDF 2026-10-06) |
 | `pfadf_mdf_cg.py` | `PFADFMDFCG` | Inline CG-MDF with filt()/update() interface |
 | `pfdaf_cg.py` | `PFDAF_CG`, `PFDAFCG` | PBFDAF-CG (AES 2006) — CG on the memory-averaged gradient; official key pfcg |
+| `conjugate_fb_toeplitz.py` | `CONJUGATE_FB_TOEPLITZ` | WOLA filterbank + per-bin RLS (solver='rls', champion 44.68) or CG (error/correlation gradient); official key fbtoe |
 
 ### Test Scripts
 | File | What it tests |
 |---|---|
-| `test_subband_echo_cancellation.py` | End-to-end NLMS vs CG-MDF echo cancellation |
+| `test_subband_echo_cancellation.py` | Official suite — keys: nlms / fdnlms / cgmdf / pfcg / fbtoe / wola |
 | `test_echo_path_comparison.py` | Echo path estimation verification |
 | `visualize_weight_convergence.py` | Weight convergence visualization |
 | `create_test_files.py` | Generate test audio from LibriSpeech samples |

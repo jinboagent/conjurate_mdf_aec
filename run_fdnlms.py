@@ -21,7 +21,11 @@ Usage:
        "canonical" is an alias of "reference microphone")
 
     Options:
-    --algo fdnlms|cgmdf|pfcg   (default fdnlms; pfcg = PBFDAF-CG, AES 2006)
+    --algo fdnlms|cgmdf|pfcg
+                          (default fdnlms; pfcg = PBFDAF-CG, AES 2006.
+                          The legacy full-frame toeplitz engine was removed
+                          2026-10-06 — criterion-cliff counterexample, code
+                          recoverable from git 2f23d9d)
     --n-g N               partitions (default 8)
     --mu F                step (default 1.0)
     --beta F              cgmdf gradient averaging (default 0.3)
@@ -44,7 +48,7 @@ import soundfile as sf
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from conjugate_mdf import CONJUGATE_MDF, FD_NLMS
+from FD_NLMS import FD_NLMS
 from pfdaf_cg import PFDAF_CG
 from harness.metrics.comparison import calculate_correlation, calculate_erle
 
@@ -61,6 +65,10 @@ def load_pair(pair):
         files = ('speechlp_reference', 'speechlp_microphone')
     elif pair == 'reverb_conference':
         files = ('reverb_conference_reference', 'reverb_conference_microphone')
+    elif pair == 'reverb30':
+        files = ('reverb_conf30_reference', 'reverb_conf30_microphone')
+    elif pair == 'reverb30n':
+        files = ('reverb_conf30n_reference', 'reverb_conf30n_microphone')
     else:
         raise SystemExit(f"unknown pair {pair!r}")
     ref, sr = sf.read(os.path.join(HERE, 'audio', f'{files[0]}.wav'))
@@ -87,7 +95,8 @@ def main():
                    default='fdnlms')
     p.add_argument('--n-g', type=int, default=8)
     p.add_argument('--mu', type=float, default=1.0)
-    p.add_argument('--beta', type=float, default=0.0)
+    p.add_argument('--beta', type=float, default=None,
+                   help='cgmdf gradient averaging (default 0.3)')
     p.add_argument('--gamma', type=float, default=0.4)
     p.add_argument('--k-max', type=int, default=1)
     p.add_argument('--beta-method', default='hestenes-stiefel',
@@ -95,12 +104,25 @@ def main():
                             'polak-ribiere', 'dai-yuan'])
     p.add_argument('--no-constraint', action='store_true')
     p.add_argument('--no-gate', action='store_true')
+    p.add_argument('--proportionate', type=float, default=0.0,
+                   help='FD_NLMS proportionate step rho (0 = uniform, the '
+                        'classic update; 0.5-0.9 favors partitions that '
+                        'already carry weight — sparse paths converge '
+                        'faster)')
+    p.add_argument('--preemph', type=float, default=0.0,
+                   help='pre-emphasis alpha (0 = off; 0.9-0.97 whitens '
+                        'speech). fdnlms/cgmdf: applied INSIDE the class, '
+                        'output de-emphasized -> ERLE directly in the raw '
+                        'domain. pfcg: pair-level preprocessing, ERLE in '
+                        'the whitened domain (de-emphasize for raw).')
     p.add_argument('--delay', type=int, default=None)
     p.add_argument('--per-second', action='store_true')
     args = p.parse_args()
 
     cons = not args.no_constraint
     gate = None if args.no_gate else 0.3
+    if args.beta is None:
+        args.beta = 0.3
 
     if args.delay is not None:
         ref, sr = sf.read(os.path.join(HERE, 'audio', 'noise_reference.wav'))
@@ -109,18 +131,30 @@ def main():
     else:
         ref, sr, mic = load_pair(args.pair)
         tag = args.pair
+    # pre-emphasis: fdnlms/cgmdf do it INSIDE the class (output comes back
+    # in the raw domain); pfcg has no class option, so pre-filter the pair
+    # (metric then in the whitened domain — de-emphasize for raw)
+    class_preemph = args.preemph if args.algo in ('fdnlms', 'cgmdf') else 0.0
+    if args.preemph and args.algo == 'pfcg':
+        a = float(args.preemph)
+        ref = np.concatenate([[0.0], ref[1:] - a * ref[:-1]])
+        mic = np.concatenate([[0.0], mic[1:] - a * mic[:-1]])
+    if args.preemph:
+        tag += f' preemph={args.preemph}'
 
     if args.algo == 'fdnlms':
         f = FD_NLMS(NCHAN=1, NBIN=FFT//2+1, N_G=args.n_g, mu=args.mu,
-                    hop=HOP, constraint=cons, gate_rel=gate)
+                    hop=HOP, constraint=cons, rho=args.proportionate,
+                    preemph=class_preemph, gate_rel=gate)
     elif args.algo == 'pfcg':
         f = PFDAF_CG(NCHAN=1, NBIN=FFT//2+1, N_G=args.n_g, hop=HOP,
                      gamma=args.gamma, k_max=args.k_max,
                      beta_method=args.beta_method, constrain='full',
                      gate_rel=gate)
     else:
-        f = CONJUGATE_MDF(NCHAN=1, NBIN=FFT//2+1, N_G=args.n_g, hop=HOP,
-                          mu=args.mu, beta=args.beta, gate_rel=gate)
+        f = FD_NLMS(NCHAN=1, NBIN=FFT//2+1, N_G=args.n_g, mu=args.mu,
+                    hop=HOP, beta=args.beta, rho=args.proportionate,
+                    preemph=class_preemph, gate_rel=gate)
     out = drive(f, ref, mic)
 
     n = min(len(mic), len(out))

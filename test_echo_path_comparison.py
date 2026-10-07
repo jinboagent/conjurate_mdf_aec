@@ -1,7 +1,8 @@
 """
 Harness test for echo path estimation comparison.
 
-Runs FD_NLMS and CONJUGATE_MDF (hop mode) through the SAME harness engine
+Runs FD_NLMS and FD_NLMS(beta=0.3) (the former CONJUGATE_MDF, merged
+2026-10-06) through the SAME harness engine
 (harness.core.runner.run_test — one overlap-save loop, one metric set) so
 the two algorithms are compared with only the weight update differing
 (their input/output frame geometry is identical by construction).

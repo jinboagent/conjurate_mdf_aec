@@ -3,12 +3,12 @@ Generic DSP -> TensorFlow wrapper framework, with a 3-contract comparison.
 
 Goal: train the CG-MDF *weight function* W [nbin x N_G] inside a machine
 learning framework and compare the result against the untouched numpy
-reference (conjugate_mdf.py::CONJUGATE_MDF, imported only — never modified).
+reference (FD_NLMS.py::FD_NLMS, the former CONJUGATE_MDF; imported only — never modified).
 
 The three integration contracts:
 
   A (exact)   DSP re-expressed in pure TF ops; GradientTape differentiates
-              the filtering automatically.                        -> conjugate_mdf_tf.py
+              the filtering automatically.                        -> conjugate_mdf_tf.py (TF port)
   B (exact)   numpy DSP forward + hand-written VJP registered with
               @tf.custom_gradient. Because partitioned filtering is LINEAR
               in the weights, the weight gradient has a closed form:
@@ -54,7 +54,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-from conjugate_mdf import CONJUGATE_MDF                    # numpy reference (untouched)
+from FD_NLMS import FD_NLMS                          # numpy reference (untouched;
+                                                           # CONJUGATE_MDF merged into
+                                                           # FD_NLMS(beta) 2026-10-06)
 from conjugate_mdf_tf import partitioned_filter_tf, run_cg_mdf_tf
 from harness.metrics.comparison import (
     calculate_echo_path_metrics,
@@ -365,14 +367,14 @@ def run_reference(X_spec, D_spec, n_blocks):
     np.random.seed(SEED)
     # canonical [0;e] MDF (hop mode); the legacy Toeplitz criterion was
     # removed from the class — this reference now runs the canonical mode
-    filt = CONJUGATE_MDF(NCHAN=1, NBIN=NBIN, N_G=N_G, hop=STEP,
-                         mu=1.0, beta=0.0, gate_rel=None, Nrxref=1)
-    w_init = filt.w_last[0][:, :, 0].astype(np.complex64)        # capture for TF port
+    filt = FD_NLMS(NCHAN=1, NBIN=NBIN, N_G=N_G, mu=1.0, hop=STEP,
+                   beta=0.0, gate_rel=None, Nrxref=1)
+    w_init = filt.w[0][:, :, 0].astype(np.complex64)        # capture for TF port
     e_ref = np.zeros((n_blocks, STEP), dtype=np.float32)
     for b in range(n_blocks):
         E = filt.apply(D_spec[b].reshape(-1, 1), X_spec[b].reshape(-1, 1))
         e_ref[b] = np.fft.irfft(E[:, 0], n=FFT)[-STEP:]
-    w_ref = filt.w_last[0][:, :, 0]
+    w_ref = filt.w[0][:, :, 0]
     return e_ref, w_ref, w_init
 
 

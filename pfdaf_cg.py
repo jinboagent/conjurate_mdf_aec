@@ -9,7 +9,7 @@ update (PBFDAF-CG) — faithful single-channel implementation of:
 
 Paper structure -> this module:
     eq. (2)-(6)   overlap-save, [0;e] error, a priori output   (as in
-                  conjugate_mdf.FD_NLMS — same frame contract)
+                  FD_NLMS.py — same frame contract)
     eq. (8)+(9)   instantaneous gradient conj(X)·E, constrained
     eq. (18)      Φ: gradient estimate AVERAGED over a sliding memory
                   (exponential average `gamma`; the averaged gradient of

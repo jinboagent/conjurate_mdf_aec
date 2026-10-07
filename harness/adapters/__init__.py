@@ -27,7 +27,8 @@ from ..core.interfaces import AdaptiveFilter
 class FreqDomainBlockAdapter(AdaptiveFilter):
     """
     Shared adapter for the frequency-domain block classes in
-    conjugate_mdf.py (CONJUGATE_MDF hop mode, FD_NLMS). The wrapped
+    FD_NLMS.py (the former CONJUGATE_MDF is its beta
+    option). The wrapped
     filter adapts internally in apply(); update() is a no-op.
 
     Parameters
@@ -67,18 +68,19 @@ class FreqDomainBlockAdapter(AdaptiveFilter):
 
 
 class CGMDFAdapter(FreqDomainBlockAdapter):
-    """CONJUGATE_MDF — the canonical [0;e] MDF (G-constraint built in,
-    reference-excitation gate). Same input/output frame geometry as
-    FD_NLMS; only the weight update differs (beta = gradient averaging)."""
+    """FD_NLMS with the beta gradient-averaging option (the former
+    CONJUGATE_MDF algorithm, merged into FD_NLMS on 2026-10-06; the key
+    name `cgmdf` is kept for benchmark continuity). G-constraint built in,
+    reference-excitation gate."""
 
     def __init__(self, n_g: int = 64, fft_size: int = 512, step: int = 128,
                  mu: float = 1.0, beta: float = 0.0, gate_rel=0.3):
-        from conjugate_mdf import CONJUGATE_MDF
+        from FD_NLMS import FD_NLMS
         super().__init__(
             fft_size, step, n_g,
-            lambda: CONJUGATE_MDF(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
-                                  hop=step, mu=mu, beta=beta,
-                                  gate_rel=gate_rel))
+            lambda: FD_NLMS(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
+                            mu=mu, hop=step, beta=beta,
+                            gate_rel=gate_rel))
 
 
 class FDNLMSAdapter(FreqDomainBlockAdapter):
@@ -86,7 +88,7 @@ class FDNLMSAdapter(FreqDomainBlockAdapter):
 
     def __init__(self, n_g: int = 64, fft_size: int = 512, step: int = 128,
                  mu: float = 1.0, constraint: bool = True, gate_rel=0.3):
-        from conjugate_mdf import FD_NLMS
+        from FD_NLMS import FD_NLMS
         super().__init__(
             fft_size, step, n_g,
             lambda: FD_NLMS(NCHAN=1, NBIN=fft_size // 2 + 1, N_G=n_g,
@@ -99,35 +101,13 @@ class FDNLMSAdapter(FreqDomainBlockAdapter):
 RLSBishengMDFAdapter = CGMDFAdapter
 
 
-class PFADFMDFCGAdapter(AdaptiveFilter):
-    """Adapter for pfadf_mdf_cg.PFADFMDFCG (thin wrapper — that class
-    already implements the block interface)."""
-
-    def __init__(self, n: int = 64, winlen: int = 256, mu: float = 0.03):
-        from pfadf_mdf_cg import PFADFMDFCG
-        self.filter = PFADFMDFCG(N=n, M=winlen, mu=mu)
-
-    def filt(self, x: np.ndarray, d: np.ndarray) -> np.ndarray:
-        return self.filter.filt(x, d)
-
-    def update(self, e: np.ndarray) -> None:
-        self.filter.update(e)
-
-    def reset(self) -> None:
-        self.filter.reset()
-
-    def get_echo_path(self) -> np.ndarray:
-        return self.filter.get_echo_path()
-
-
 def create_standard_rlsmdf_adapter(n_g: int = 64, fft_size: int = 512,
                                    step: int = 128, mu: float = 1.0
                                    ) -> CGMDFAdapter:
     """Standard CG-MDF adapter with recommended (hop-mode) parameters."""
     return CGMDFAdapter(n_g=n_g, fft_size=fft_size, step=step, mu=mu)
 
-
-def create_standard_pfadf_mdf_cg_adapter(n: int = 64, winlen: int = 256,
-                                         mu: float = 0.03
-                                         ) -> PFADFMDFCGAdapter:
-    return PFADFMDFCGAdapter(n=n, winlen=winlen, mu=mu)
+# PFADFMDFCGAdapter / create_standard_pfadf_mdf_cg_adapter removed
+# 2026-10-06: pfadf_mdf_cg.py no longer exists in the repo (its lazy
+# import could never succeed); the surviving OLS engines are FD_NLMS
+# (via CGMDFAdapter/FDNLMSAdapter) and PFCG.

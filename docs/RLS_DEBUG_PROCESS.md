@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document chronicles the complete debugging process for the `RLSBishengMDF` algorithm (now `conjugate_mdf.py`), from initial failure to working implementation with 2M-point FFTs.
+This document chronicles the complete debugging process for the `RLSBishengMDF` algorithm (now `FD_NLMS.py`, renamed from conjugate_mdf.py 2026-10-06), from initial failure to working implementation with 2M-point FFTs.
 
 ---
 

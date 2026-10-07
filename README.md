@@ -9,8 +9,7 @@ A collection of frequency-domain adaptive filtering algorithms for **Acoustic Ec
 | Algorithm | File | Adaptation | Use Case |
 |-----------|------|------------|----------|
 | **PFADF MDF CG** | `pfadf_mdf_cg.py` | Normalized gradient | Stable + sub-partition delay resolution |
-| **CONJUGATE_MDF (canonical `[0;e]` MDF)** | `conjugate_mdf.py` | Normalized gradient + β-averaging, excitation gate, G-projection | The reference implementation — cliff-free at any delay |
-| **FD_NLMS** | `conjugate_mdf.py` (same module) | Instantaneous normalized gradient | The classic FDAF baseline (≡ CONJUGATE_MDF at β=0) |
+| **FD_NLMS** | `FD_NLMS.py` (renamed from conjugate_mdf.py, 2026-10-06) | Instantaneous normalized gradient; `beta > 0` turns on gradient averaging (the former CONJUGATE_MDF algorithm, merged 2026-10-06 bit-exact), excitation gate, G-projection | The canonical engine — cliff-free at any delay |
 | **PBFDAF-CG (AES 2006)** | `pfdaf_cg.py` | Conjugate-gradient direction on the memory-averaged gradient | Fastest convergence on longer signals |
 
 All four share the same overlap-save frame contract: full-frame FFTs in,
@@ -32,18 +31,30 @@ Reference (x) ──→ [Loudspeaker] ──→ [Room h] ──→ [Mic] ──�
                                           └──→ [Weight Update]
 ```
 
+**Start here:** [docs/OVERVIEW.md](docs/OVERVIEW.md) — theory, engines, configuration, and the full results ladder.
+
 See [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) for full architecture details, and [DATAFLOW.md](DATAFLOW.md) for signal flow diagrams.
 
 ## Benchmark Results
 
-### Official suite (test_subband_echo_cancellation.py, canonical 50 ms pair, FFT 512 / hop 128, N_G=8)
+### Official suite (test_subband_echo_cancellation.py, canonical 50 ms pair)
 
 | key | algorithm | ERLE | Correlation | Status |
 |-----|-----------|------|-------------|--------|
 | `nlms` | time-domain NLMS | 22.27 dB | 0.997 | PASS |
-| `fdnlms` | FD_NLMS (`[0;e]` + G) | 23.77 dB | 0.998 | PASS |
-| `cgmdf` | CONJUGATE_MDF (β=0 ≡ fdnlms) | 23.77 dB | 0.998 | PASS |
-| `pfcg` | PBFDAF-CG (AES 2006, γ=0.4) | **26.11 dB** | **0.999** | PASS |
+| `fdnlms` | FD_NLMS (`[0;e]` + G), FFT 512 / hop 128 | 23.77 dB | 0.998 | PASS |
+| `cgmdf` | FD_NLMS with β-gradient-averaging (β=0 ≡ fdnlms; β=0.3 → 24.47 dB via run_fdnlms) | 23.77 dB | 0.998 | PASS |
+| `pfcg` | PBFDAF-CG (AES 2006, γ=0.4) | 26.11 dB | 0.999 | PASS |
+| `fbtoe` | **WOLA FB-Toeplitz, per-bin RLS** (conjugate_fb_toeplitz, nfft 1024 / hop 256) | **44.68 dB** | **1.0000** | PASS |
+
+(The `wola` per-bin-NLMS sibling — 10.66 dB FAIL — was removed 2026-10-06:
+the NLMS baseline role is covered by `fdnlms`. Its measurement is archived in
+results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md.)
+
+The 4×-oversampled WOLA filterbank family (added 2026-10-06) is documented in
+[docs/wola_vs_overlapsave.md](docs/wola_vs_overlapsave.md) and
+[docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md); its
+experiment log is `results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md`.
 
 ### PBFDAF-CG vs FD_NLMS across pairs (γ=0.4, Hestenes-Stiefel)
 
@@ -96,7 +107,7 @@ both since superseded by the canonical rewrite.
 ### Official test suite (all algorithms, one command each)
 
 ```bash
-.venv/Scripts/python test_subband_echo_cancellation.py cgmdf    # or nlms | fdnlms | pfcg
+.venv/Scripts/python test_subband_echo_cancellation.py fbtoe   # or nlms | fdnlms | cgmdf | pfcg
 ```
 
 ### Parameterized A/B driver
@@ -110,7 +121,7 @@ both since superseded by the canonical rewrite.
 ### Python API
 
 ```python
-from conjugate_mdf import CONJUGATE_MDF, FD_NLMS
+from FD_NLMS import FD_NLMS
 from pfdaf_cg import PFDAF_CG
 import numpy as np
 import soundfile as sf
@@ -168,7 +179,7 @@ See [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) for the full methodology.
 
 | Script | Purpose |
 |--------|---------|
-| `test_subband_echo_cancellation.py` | Official suite — keys `nlms` / `fdnlms` / `cgmdf` / `pfcg` |
+| `test_subband_echo_cancellation.py` | Official suite — keys `nlms` / `fdnlms` / `cgmdf` / `pfcg` / `fbtoe` |
 | `run_fdnlms.py` | Parameterized CLI driver (pair, algo, γ/β/k_max knobs, per-second ERLE) |
 | `test_echo_path_comparison.py` | Echo path estimation verification (shared harness) |
 | `visualize_weight_convergence.py` | Weight convergence visualization suite |

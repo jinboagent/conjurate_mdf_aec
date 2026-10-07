@@ -2,7 +2,8 @@
 Contract A — TensorFlow functional port of the Conjugate Gradient MDF.
 
 This is a faithful TF (complex64) reimplementation of the recurrence in
-conjugate_mdf.py::CONJUGATE_MDF.apply(), restructured so TensorFlow can
+FD_NLMS.py::FD_NLMS.apply() (the former CONJUGATE_MDF; the module was
+renamed from conjugate_mdf.py on 2026-10-06), restructured so TensorFlow can
 differentiate through it:
 
 - functional state passing (state in -> new state out, no in-place mutation)
@@ -22,7 +23,7 @@ Two entry points:
 - partitioned_filter_tf(): filtering only with FIXED weights W — the
   trainable-weights forward pass (linear in W, vectorized over all blocks)
 
-The numpy reference (conjugate_mdf.py) is never modified; this file only
+The numpy reference (FD_NLMS.py, formerly conjugate_mdf.py) is never modified; this file only
 mirrors its math.
 """
 

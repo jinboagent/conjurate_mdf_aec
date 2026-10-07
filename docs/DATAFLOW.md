@@ -11,12 +11,13 @@
 2. [Overlap-Save Block Processing](#2-overlap-save-block-processing)
 3. [Partitioned Buffer Structure](#3-partitioned-buffer-structure)
 4. [PFDAF Data Flow (LMS Baseline)](#4-pfdaf-data-flow-lms-baseline)
-5. [Canonical CONJUGATE_MDF Data Flow](#5-canonical-conjugate_mdf-data-flow)
+5. [Canonical FD_NLMS Data Flow](#5-canonical-fd_nlms-data-flow)
 6. [Weight Update Strategies](#6-weight-update-strategies)
 7. [Sub-Hop Delays: Representation vs the Criterion Cliff](#7-sub-hop-delays-representation-vs-the-criterion-cliff)
 8. [Echo Path Generation and Verification](#8-echo-path-generation-and-verification)
 9. [Test Harness Flow](#9-test-harness-flow)
 10. [Benchmark: 50 ms delay + lowpass pair](#10-benchmark-50-ms-delay--lowpass-pair-reference-target--20-db)
+11. [WOLA Filterbank Family (FB-Toeplitz)](#11-wola-filterbank-family--conjugate_fb_toeplitz)
 
 ---
 
@@ -95,7 +96,7 @@ The frame length is **any integer multiple of the hop**: `L = R·M`.
 The classic textbook scheme uses `R = 2`; the current harness wrapper
 (`CGMDF(fft_size=512, step=128)` in `test_subband_echo_cancellation.py`)
 runs `R = 4`. Both are just settings of the same two knobs
-(`fft_size`, `step`) — nothing in `CONJUGATE_MDF` itself knows `L` or `M`;
+(`fft_size`, `step`) — nothing in `FD_NLMS` itself knows `L` or `M`;
 it only sees pre-transformed frames (§5).
 
 > **Notation note:** this document uses `N_G` for the number of frequency
@@ -323,13 +324,13 @@ Total:                       O((4 + 2N) × M log M)
 
 > **Historical note (2026-10-01):** the legacy full-frame Toeplitz-CG
 > criterion that this section previously described was REMOVED from
-> `conjugate_mdf.py` (recoverable from git `2f23d9d`; records in
+> the legacy class inside conjugate_mdf.py at git `2f23d9d` (module renamed FD_NLMS.py 2026-10-06); records in
 > results/2026-10-01_class-simplify/). The flow below is the CURRENT
 > canonical class. A short summary of the removed criterion is in §5.5.
 
-## 5. Canonical CONJUGATE_MDF Data Flow
+## 5. Canonical FD_NLMS Data Flow
 
-`conjugate_mdf.py` — the classic partitioned-block MDF (Lee & Chang):
+`FD_NLMS.py` — the classic partitioned-block MDF (Lee & Chang):
 `[0;e]` criterion + normalized gradient + G-projection. Works on
 pre-transformed frequency-domain inputs (no internal overlap-save);
 `FD_NLMS` in the same module is the identical geometry with an
@@ -337,7 +338,7 @@ instantaneous gradient (`beta=0` reproduces it exactly, 1.6e-16).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  CONJUGATE_MDF.apply(Y, Y_rx) — ONE FRAME                                   │
+│  FD_NLMS.apply(Y, Y_rx) — ONE FRAME                                         │
 │                                                                             │
 │  INPUT: Y [NBIN, NCHAN] (mic), Y_rx [NBIN, Nrxref] (reference)              │
 │         (already FULL L-sample frame FFTs from the external wrapper)        │
@@ -409,7 +410,8 @@ instantaneous gradient (`beta=0` reproduces it exactly, 1.6e-16).
 ### Key difference from PFDAF
 
 ```
-              PFDAF (LMS)                    CONJUGATE_MDF (canonical)
+              PFDAF (LMS)                    FD_NLMS (canonical; β option =
+                                             the former CONJUGATE_MDF)
               ───────────                    ─────────────────────────
 Input         Time-domain blocks             Frequency-domain frames
               (handles own FFT)              (external FFT)
@@ -474,9 +476,9 @@ machinery in git `2f23d9d`.
 
 ### Strategy 2: Toeplitz CG (the REMOVED legacy criterion — historical)
 
-> Removed from `conjugate_mdf.py` on 2026-10-01 (git `2f23d9d`): its
+> Removed from the module (conjugate_mdf.py at git `2f23d9d`; renamed FD_NLMS.py 2026-10-06) on 2026-10-01: its
 > full-frame criterion is the cliff condition (§7.3). Kept here as the
-> algorithm survey; the current CONJUGATE_MDF uses Strategy 1's update
+> algorithm survey; the current FD_NLMS uses Strategy 1's update
 > with β-averaging (§5).
 
 ```
@@ -606,7 +608,7 @@ alias into wrong output samples — genuinely unmodelable. This is why
 
 ### 7.3 Problem 2 (the CLIFF): the full-frame criterion vs r ≠ 0
 
-`CONJUGATE_MDF` fits the **whole L-sample frame spectrum** — head included
+the legacy correlation engine fit the **whole L-sample frame spectrum** — head included
 — even though only the last M samples are ever kept as output. For a delay
 with `r = d mod M ≠ 0` the true weight's response in the head contains
 circular-wrap spill:
@@ -663,7 +665,7 @@ it; it only costs more frames per second.
 **Criterion-only A/B (scratch_classic_criterion.py, delay 800, identical
 pair-window geometry and regressors):** classic `[0;e]` criterion (error on
 the new block only — what standard FDAF/FBLMS/MDF computes): optimum ≥
-288.7 dB. Full-frame per-bin criterion (what `CONJUGATE_MDF`'s correlations
+288.7 dB. Full-frame per-bin criterion (what the legacy engine's correlations
 encode): 10.3 dB. Same data, same frames, same weights available — only the
 objective differs.
 
@@ -671,9 +673,9 @@ objective differs.
 
 | Route | What | Status |
 |---|---|---|
-| **CONJUGATE_MDF** (current; canonical-only since 2026-10-01) | the classic `[0;e]` MDF — exact valid-region gradient, FD-NLMS normalization (`mu`, `beta`=gradient averaging), G-constraint built in, reference-excitation gate. No mode switch: `hop` is a plain required parameter; the legacy full-frame criterion was removed at user request (recoverable from git `2f23d9d`; the brief `full_frame_error` ablation flag was removed 2026-10-05 too — measured ablation in results/2026-10-01_hop-ablation/) | **implemented & PASS**: canonical pair **23.77 dB / corr 0.9982**; noise oracle 43.2 dB with the true path learned exactly; cliff check 45.2/44.3 dB at delays 640/800 (no gap); `beta=0` ≡ FD_NLMS **exactly** (1.6e-16) |
+| **FD_NLMS** (current; the former CONJUGATE_MDF merged in as the β option 2026-10-06, bit-exact) | the classic `[0;e]` MDF — exact valid-region gradient, FD-NLMS normalization (`mu`, `beta`=gradient averaging), G-constraint built in, reference-excitation gate. No mode switch: `hop` is a plain required parameter; the legacy full-frame criterion was removed at user request (recoverable from git `2f23d9d`; the brief `full_frame_error` ablation flag was removed 2026-10-05 too — measured ablation in results/2026-10-01_hop-ablation/) | **implemented & PASS**: canonical pair **23.77 dB / corr 0.9982**; noise oracle 43.2 dB with the true path learned exactly; cliff check 45.2/44.3 dB at delays 640/800 (no gap); `beta=0` ≡ FD_NLMS **exactly** (1.6e-16) |
 | Table 2 / PAES constrained criterion | full Table-2 machinery (circulant D_T from truncated rg + G̃-wrapped products, kmax>1, Polak-Ribière) — the deeper CG structure on top of the same valid-region criterion | future work on top of hop mode |
-| Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in conjugate_mdf.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged); the whole-frame ablation (removed flag, re-measured 2026-10-01) cliffs — canonical pair 5.40 dB vs 23.77, synthetic delay-800 13.0 vs 44.3 (results/2026-10-01_hop-ablation/) |
+| Classic FDAF-NLMS ([0;e] error) | `FD_NLMS` in FD_NLMS.py — same interface/geometry, simplest classic form | **verified no-cliff**: delay 800 reaches the 49 dB oracle ceiling (converged); the whole-frame ablation (removed flag, re-measured 2026-10-01) cliffs — canonical pair 5.40 dB vs 23.77, synthetic delay-800 13.0 vs 44.3 (results/2026-10-01_hop-ablation/) |
 | **PBFDAF-CG (AES 2006)** | `PFDAF_CG` in pfdaf_cg.py — CG direction on the memory-averaged [0;e] gradient + per-bin Gram line search; official key `pfcg` | **implemented & PASS**: canonical **26.11 dB / corr 0.999** (26.31 before the gate-restart hardening), noise 48.06, speechlp 31.44; benefit grows with signal length (canonical×4 20 s: 27.63 vs FD_NLMS 17.69); β ranking HS ≥ DY > PR ≫ FR (results/2026-10-05_pfdaf-cg/) |
 | Unconstrained FDAF (no G-projection; Mansour & Gray UFLMS) | `--no-constraint` (FD_NLMS) — skip the per-partition irfft/rfft projection | **no cliff, and +2.4 dB on the canonical pair (26.16 vs 23.77)**: each partition keeps its wrap taps, which add sub-hop delay freedom; weights are no longer hop-tap causal filters |
 | Sample-domain engine | NLMS / time-domain CG: no windowing → no cliff | NLMS reaches the 49 dB oracle ceiling |
@@ -687,7 +689,7 @@ objective differs.
       step     = M   (hop; current 128)
       n_g      = N_G (partitions; delay coverage (N_G+R−2)·M)
 
-  CONJUGATE_MDF itself is agnostic: it sees NBIN = L/2+1 bins and N_G
+  FD_NLMS itself is agnostic: it sees NBIN = L/2+1 bins and N_G
   lagged frames; the geometry lives entirely in the wrapper's FFT/hop.
 ```
 
@@ -815,11 +817,11 @@ Two generators exist; do not mix them up:
 
   ref[n] ──→ ┌──────────────────────────────────────────────┐
              │  CGMDF / FDNLMS / PFCG (test_subband_echo_cancellation) │
-             │  (identical wrapper; CLI keys 'cgmdf'/'fdnlms'/'pfcg')  │
+             │  (CLI keys 'cgmdf'/'fdnlms'/'pfcg'/'fbtoe'/'nlms')       │
              │                                              │
              │  ┌─────────────┐    ┌─────────────────┐      │
   x_block ──→│  │  rfft(x)    │───→│                 │      │
-  (fft_size) │  │  → X[k]     │    │  CONJUGATE_MDF  │      │
+  (fft_size) │  │  → X[k]     │    │  FD_NLMS        │      │
              │  └─────────────┘    │  .apply(D, X)   │      │
   d_block ──→│  ┌─────────────┐    │  (or FD_NLMS —  │      │
   (fft_size) │  │  rfft(d)    │───→│  same geometry) │      │
@@ -889,7 +891,8 @@ Two generators exist; do not mix them up:
   │  │  │  │  FIX (implemented, §7.4):    │        │      │       │
   │  │  │  │  the [0;e] criterion —       │        │      │       │
   │  │  │  │  grade ONLY the new block    │        │      │       │
-  │  │  │  │  (CONJUGATE_MDF / FD_NLMS);  │        │      │       │
+  │  │  │  │  (FD_NLMS; β option = the   │        │      │       │
+  │  │  │  │   former CONJUGATE_MDF);    │        │      │       │
   │  │  │  │  or sample-domain engine     │        │      │       │
   │  │  │  │  (NOT "use a bigger FFT" —  │        │      │       │
   │  │  │  │  the cliff is R-independent) │        │      │       │
@@ -940,13 +943,65 @@ speechlp`; record: `results/2026-10-01_speechlp-benchmark/`.
 
 ---
 
+## 11. WOLA Filterbank Family (CONJUGATE_FB_TOEPLITZ)
+
+> Added 2026-10-06. A second machine (see `docs/wola_vs_overlapsave.md` for the
+> full OLS-vs-WOLA theory): the FFT is the filterbank itself, weights are
+> per-bin scalars, and the criterion is structurally headless — no [0;e], no
+> G projection.
+
+### 11.1 Data flow (per hop, `conjugate_fb_toeplitz.py`)
+
+```
+x_block,d_block [hop] ──► analysis: rfft(q · [history ‖ block])   q = sqrt-Hann
+        │                     (nfft=1024, hop=256 → 4x oversampled, 513 bins)
+        ▼
+buf_X shift register  ──► rx[:, j] = X(m−j),  j = 0…n_g−1        (subband lags)
+        ▼
+per-bin a-priori error E_b = D_b − Σ_j w_b[j]·X_b[m−j]            (scalar! no head)
+        ▼
+solver = 'rls'  : P ← (P − K uᴴP)/λ, K = P·conj(u)/(λ+uᴴPu), w += K·E
+        └ P(0) = I/δ fading loading; gate freezes P,w (anti-wind-up)
+solver = 'cg'   : φ ← γφ + (1−γ)·conj(rx)E  (error dir.) | g = rcross−T·w (corr)
+                  α = 0.999⟨g,v⟩/(⟨v,Tv⟩ + δ·P·‖v‖²),  T = toeplitz(autoR)
+        ▼
+synthesis: acc += (2/k)·q·irfft(E);  emit oldest hop    (COLA/PR, k/2 sum)
+```
+
+### 11.2 Official numbers (2026-10-06, canonical pair)
+
+| engine / config | ERLE | corr |
+|---|---|---|
+| **fbtoe, solver='rls' (δ=0.1, λ=0.999)** | **44.68 dB** | **1.0000** |
+| fbtoe, CG error gradient (δ=1, γ=0.1) | 29.78 dB | 0.9995 |
+| ~~wola (CONJUGATE_FULL per-bin NLMS)~~ — removed 2026-10-06 | was 10.66 dB | FAIL (step starvation); NLMS baseline role covered by fdnlms |
+| correlation gradient (any tuning; class default) | ≤ 9.35 dB | trajectory failure |
+
+Geometry levers (CG and RLS both benefit): hop 256→128 gives 1024/128 =
+55.30 (RLS) / 36.92 (CG); hop 64 collapses (16x lag collinearity). Full
+record: `results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md` (Addenda 4–8),
+theory: `docs/autocorr_matrix_methods.md`.
+
+### 11.3 The legacy full-frame engine (removed)
+
+`conjugate_toeplitz.py` (restoration of the pre-2026-10-01 full-frame
+Toeplitz-CG, bit-identical to git `2f23d9d`) served as the criterion-cliff
+counterexample (5.94 dB) and was **removed 2026-10-06** at user request;
+`_herm_toeplitz_matvec` is vendored into `conjugate_fb_toeplitz.py`, and
+`run_fdnlms.py --algo` no longer offers `toeplitz`. Its measurement lives in
+`results/2026-10-06_conjugate-toeplitz/FINDINGS.md`.
+
+---
+
 ## Quick Reference: File → Algorithm → Data Flow Section
 
 | File | Algorithm | See Section |
 |------|-----------|-------------|
 | `pfadf_mdf_cg.py` | PFADF MDF CG | [§4](#4-pfdaf-data-flow-lms-baseline) |
-| `conjugate_mdf.py` | CONJUGATE_MDF (canonical `[0;e]`) + FD_NLMS | [§5](#5-canonical-conjugate_mdf-data-flow), [§7](#7-sub-hop-delays-representation-vs-the-criterion-cliff) |
+| `FD_NLMS.py` | FD_NLMS (canonical `[0;e]`; β option absorbed CONJUGATE_MDF 2026-10-06) | [§5](#5-canonical-fd_nlms-data-flow), [§7](#7-sub-hop-delays-representation-vs-the-criterion-cliff) |
 | `pfdaf_cg.py` | PFDAF-CG (AES 2006, working; official key `pfcg`) | [§6 Strategy 3](#6-weight-update-strategies) |
-| `test_subband_echo_cancellation.py` | Block wrapper (keys: nlms / fdnlms / cgmdf / pfcg) | [§9](#9-test-harness-flow) |
-| `run_fdnlms.py` | CLI driver: FD_NLMS / CONJUGATE_MDF / PFDAF-CG A/B runs | [§10](#10-benchmark-50-ms-delay--lowpass-pair-reference-target--20-db) |
+| `conjugate_fb_toeplitz.py` | WOLA FB-Toeplitz: per-bin RLS / CG solvers (official key `fbtoe`) | [§11](#11-wola-filterbank-family--conjugate_fb_toeplitz) |
+| `conjugate_full.py` | **removed 2026-10-06** (WOLA per-bin NLMS, key `wola`, 10.66 dB — NLMS baseline role covered by fdnlms) | — |
+| `test_subband_echo_cancellation.py` | Block wrapper (keys: nlms / fdnlms / cgmdf / pfcg / fbtoe) | [§9](#9-test-harness-flow), [§11](#11-wola-filterbank-family--conjugate_fb_toeplitz) |
+| `run_fdnlms.py` | CLI driver: FD_NLMS (β option = former CONJUGATE_MDF) / PFDAF-CG A/B runs (toeplitz removed 2026-10-06) | [§10](#10-benchmark-50-ms-delay--lowpass-pair-reference-target--20-db) |
 | `test_echo_path_comparison.py` | Shared-harness comparison on the ground-truth room path | [§8](#8-echo-path-generation-and-verification) |
