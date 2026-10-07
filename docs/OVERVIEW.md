@@ -107,6 +107,13 @@ Full comparison (including the three axes that actually differ once you
 notice both machines do per-bin cross-lag convolution):
 [wola_vs_overlapsave.md](wola_vs_overlapsave.md).
 
+*A rig variant exists with a longer-than-FFT prototype (Lp = OS·nfft): its
+analysis aliases the delay axis mod nfft (the "fold" — same-phase segment
+add) before one short nfft-FFT, halving channels and decoupling filter
+length from FFT cost; our engine is the OS=1 case where fold is the
+identity. See [fold_and_oversampling_notes.md](fold_and_oversampling_notes.md)
+and [fold_trick.png](fold_trick.png).*
+
 ## 4. The engines, their results, and why performance differs
 
 ### 4.1 Scoreboard (canonical pair, official metric, re-run 2026-10-06)
@@ -170,6 +177,22 @@ Geometry multiplies on top: hop 256→128 (8× overlap) raised RLS to **55.30**
 and the CG hybrid to 36.92 (scratch-verified; not wired into the official
 wrapper yet). Dense reverb needs coverage first: reverb30 (800 ms RIR)
 requires n_g ≥ 32, where RLS also leads (26.31 vs 23.85).
+
+**The geometry table** (CG error hybrid; canonical / speechlp / d512@4s;
+overlap = nfft/hop, standard oversampling = nbin/hop = half that):
+
+| nfft/hop | overlap | canonical | speechlp | d512@4s |
+|----------|---------|-----------|----------|---------|
+| 1024/256 *(wrapper)* | 4× | 29.71 | 35.42 | 29.65 |
+| **1024/128** | **8×** | **36.92 (+7.1)** | **40.84 (+5.4)** | **31.85** |
+| 2048/128 | 16× | 35.68 | 41.20 | 36.54 |
+| 1024/64 | 16× | 6.57 | 6.67 | 23.27 |
+| 256/128 | 2× | 19.67 | 19.62 | 67.12 |
+
+hop shrinks = faster adaptation AND a finer lag grid; both edges fail
+(hop 64: collinearity collapse; short window: speech starves). **1024/128
+is the sweet spot** and stacks with RLS (55.30 / 57.44; 2048/128 → 64.77 /
+65.21). Latency nfft−hop: 56 ms at 1024/128, 112 ms at 2048/128.
 
 ## 5. The two tangled questions
 

@@ -63,11 +63,32 @@ d512 probe: RLS run ungated — stationary always-on excitation):
 Every knob combined is worth +3 dB — the direction itself points at a moving
 target; no step size fixes that.
 
-Geometry stacks on top of the solver: at hop 128 (8× overlap) the same engines
-reach **RLS 55.30 dB / CG 36.92 dB** on canonical (scratch-verified; wrapper
-still at 1024/256 for benchmark continuity). Dense reverb needs coverage
-first: reverb30 (800 ms RIR) requires n_g ≥ 32, where RLS also leads
-(26.31 vs 23.85).
+### Geometry: hop and nfft are first-order knobs
+
+Shrinking the hop at fixed nfft improves TWO things at once — the adaptation
+rate (steps/second ∝ 1/hop) and the subband lag-grid density (the canonical
+800-sample delay = 6.25 lags at hop 128 vs 3.125 at hop 256, halving the
+fractional-lag interpolation burden). Measured on the CG error-hybrid
+(canonical / speechlp / d512@4s), oversampling ratio = nfft/hop
+(standard convention: nbin/hop = half that):
+
+| nfft/hop | overlap | canonical | speechlp | d512@4s |
+|----------|---------|-----------|----------|---------|
+| 1024/256 *(wrapper default)* | 4× | 29.71 | 35.42 | 29.65 |
+| **1024/128** | **8×** | **36.92 (+7.1)** | **40.84 (+5.4)** | **31.85** |
+| 2048/128 | 16× | 35.68 | 41.20 | 36.54 |
+| 1024/64 | 16× | 6.57 | 6.67 | 23.27 |
+| 256/128 | 2× | 19.67 | 19.62 | 67.12 |
+
+The table has edges in both directions: hop 64 over-collinearizes the lag
+regressors (16× ratio → the per-bin system degenerates, 6.6 dB), and a short
+window (256/128) starves speech while being near-RLS-fast on the stationary
+probe (67.12). **1024/128 is the sweet spot**, and the gain STACKS with the
+solver: RLS at 1024/128 = **55.30 dB**, at 2048/128 = **64.77 dB** (scratch-
+verified; the official wrapper stays at 1024/256 = 44.68 for benchmark
+continuity). Price: latency nfft−hop (56 ms at 1024/128) and compute ×2 per
+hop halving. Dense reverb needs coverage first: reverb30 (800 ms RIR)
+requires n_g ≥ 32 (RLS 26.31 vs CG 23.85 at n_g=32).
 
 ## The two processing machines
 
@@ -103,6 +124,21 @@ Full comparison (isomorphism of the multiplication structures, the three
 real difference axes, oversampling conventions):
 [docs/wola_vs_overlapsave.md](docs/wola_vs_overlapsave.md) (English:
 [docs/wola_vs_overlapsave_en.md](docs/wola_vs_overlapsave_en.md)).
+
+#### The reference rig's variant: polyphase fold before a short FFT
+
+The original rig (`polyphase_dft_fb_analysis.m`) runs the same WOLA idea
+with a **longer prototype than the FFT** (Lp = 1024, nfft = 512): because
+the demodulation waveform e^(−j2πkd/512) has period nfft, the two halves of
+the windowed frame (delays d and d+512) carry identical modulation phase
+and can be **added before a single 512-FFT** — the "fold". This is exact
+(1e-14), halves the FFT cost and the channel count (257 coarse bins), and
+decouples filter length from FFT size; our engine sits at the OS=1 special
+case where fold is the identity (1024 window, 1024 rfft, 513 fine bins).
+![fold trick](docs/fold_trick.png)
+Full notes: [docs/fold_and_oversampling_notes.md](docs/fold_and_oversampling_notes.md)
+(English: [docs/fold_and_oversampling_notes_en.md](docs/fold_and_oversampling_notes_en.md));
+rig principle: ![rig buffer + fold](docs/osfb_analysis_buffer.png).
 
 ## Algorithms
 
