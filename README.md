@@ -297,16 +297,61 @@ explicitly and `mic = conv(ref, h)`, so every run can verify the engine
   white noise (the conditioning-friendly ceiling oracle), 30 s variants
   (the data-quantity axis), three documented rooms;
 - echo tiers: single delayed tap (0.4 @ 50 ms) → Butterworth-lowpassed tap →
-  a three-part synthetic room RIR (direct path + 8 early reflections +
-  lowpass-colored RT60 tail + secondary reflections; scenarios office /
-  conference / huddle, seeds 42/123/456, normalized to a passive room:
-  energy ≤ 1 and |H(f)| ≤ 1);
+  the room model below;
 - success = ERLE ≥ 15 dB **and** echo-estimate correlation ≥ 0.9 **and** the
   learned path matching the ground truth (NMSE < −20 dB, peak position and
   amplitude). Example: canonical true `0.40 @ 800` vs learned
   `0.3941 @ delay 800`.
 
-Full details: [docs/OVERVIEW.md §6](docs/OVERVIEW.md#6-test-data-reference-choice-echo-reverb-and-the-ground-truth).
+### The reverb echo model (room RIR generation)
+
+The reverberant pairs are produced by a five-step synthetic room impulse
+response (`wav_files_scripts/echo_path_generator.py`, wrapped by
+`harness_template/ground_truth/generators.py::generate_room_echo_signals`;
+full flow diagrams in [DATAFLOW.md §8](docs/DATAFLOW.md)):
+
+```
+RoomParameters (per scenario)                  RIR synthesis, five steps:
+  sampling_rate   16000 Hz                     1. DIRECT PATH      h[45ms] = 0.6
+  filter_length   300–800 ms                   2. EARLY REFLECTIONS 8 taps within 50 ms after
+  initial_delay   20–60 ms                          the direct path, amp 0.1–0.4 × direct,
+  RT60            150–500 ms                        random sign (wall/desk bounces)
+  (num_reflections, decay_factor)               3. LATE REVERB      Gaussian noise lowpass-
+                                                    colored at 0.3·fs/2 (rooms absorb
+                                                    highs) × exp(−t·6.9/RT60), scaled 0.15,
+                                                    10 ms fade-in — the dense tail
+                                                 4. SECONDARY REFL.  15 taps at 0.05–0.2 ×
+                                                    direct, each Hann-spread ±3 samples
+                                                 5. FADE-OUT         last 10 % of the filter
+                                                    (no truncation click)
+        ┌────────────────────────────────────────────────────────┐
+   h ── │ 0 ──┬────────╲ direct @720                            │
+        │     │         ╲╱╲ early (8)                            │
+        │     │──────────╲╱──╲──╱╲╱╲──╱╲── exp decay tail ──────│──→ mic = conv(ref, h)
+        └────────────────────────────────────────────────────────┘
+   then PASSIVE-ROOM NORMALIZATION: unit energy AND max|H(f)| ≤ 1
+   (the mic can never be louder than the reference — physical echo)
+```
+
+Three documented scenarios (seeds fixed for reproducibility):
+
+| scenario | filter length | initial delay | RT60 | seed | generated pair |
+|---|---|---|---|---|---|
+| office | 500 ms | 45 ms | 300 ms | 42 | `audio/reverb_office_*` |
+| conference | 800 ms | 60 ms | 500 ms | 123 | `audio/reverb_conference_*`, `reverb_conf30_*` (30 s) |
+| huddle | 300 ms | 20 ms | 150 ms | 456 | `audio/reverb_huddle_*` |
+
+Driver: `wav_files_scripts/create_reverb_signals.py` (speech reference,
+5 s) and the 30 s soak variants via `generate_room_echo_signals` directly.
+**Reverb results**: coverage binds first — the RIR (up to 800 ms = 12800
+samples) dwarfs N_G·hop = 1024–2048, so dense-reverb runs need N_G/n_g ≥ 32;
+with n_g=32 on reverb30: RLS 26.31 vs CG 23.85 dB (scratch). The 30 s soak
+also showed data quantity is its own variable: FD_NLMS N_G=64 goes 7.6 dB
+(5 s) → 18.5–23.3 dB (30 s) on the noise pair.
+
+Full details: [docs/OVERVIEW.md §6](docs/OVERVIEW.md#6-test-data-reference-choice-echo-reverb-and-the-ground-truth)
+and [DATAFLOW.md §8](docs/DATAFLOW.md) (generation + verification flow
+diagrams).
 
 ## Usage
 
