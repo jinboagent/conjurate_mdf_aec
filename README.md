@@ -1,134 +1,158 @@
-# pdfaf_mdf — Partitioned-Block Frequency-Domain Adaptive Filters for Acoustic Echo Cancellation
+# Linear Acoustic Echo Cancellation — Partitioned & Filterbank Frequency-Domain Adaptive Filters
 
-A collection of frequency-domain adaptive filtering algorithms for **Acoustic Echo Cancellation (AEC)**, implemented in pure Python/NumPy. Includes a reusable test harness with two-level verification (signal + model) for fair algorithm comparison.
+A collection of frequency-domain adaptive filtering algorithms for **Acoustic
+Echo Cancellation (AEC)**, implemented in pure Python/NumPy. Two processing
+machines are compared on identical signals, metrics, and ground-truth echo
+paths: the classic **overlap-save FDAF** family and a **4×-oversampled WOLA
+filterbank** family whose per-bin RLS solver is the current champion
+(**44.68 dB ERLE** on the official pair).
+
+**Start here:** [docs/OVERVIEW.md](docs/OVERVIEW.md) — theory, the two
+machines, the full engine scoreboard, the tangled gradient questions, and the
+configuration reference.
+
+## Results at a glance
+
+Official suite — `test_subband_echo_cancellation.py`, canonical pair
+(50 ms delay, 0.40 gain, LibriSpeech speech, 5 s), metric = ERLE after a 1 s
+transient + echo-estimate correlation + learned-path check:
+
+| key | engine | machine | ERLE | corr | status |
+|-----|--------|---------|------|------|--------|
+| `nlms` | time-domain NLMS (per-sample) | — | 22.27 dB | 0.997 | PASS |
+| `fdnlms` | FD_NLMS (OLS, [0;e] + G) | OLS 512/128 | 23.77 dB | 0.998 | PASS |
+| `cgmdf` | FD_NLMS **β=0** (≡ fdnlms; β=0.3 → 24.47 dB via run_fdnlms) | OLS 512/128 | 23.77 dB | 0.998 | PASS |
+| `pfcg` | PBFDAF-CG (AES 2006, γ=0.4) | OLS | 26.11 dB | 0.999 | PASS |
+| `fbtoe` | **WOLA FB-Toeplitz + per-bin RLS** | WOLA 1024/256 | **44.68 dB** | **1.0000** | PASS |
+
+### The WOLA solver ladder (same filterbank, three solvers)
+
+ERLE on three signals — canonical speech, 30 s lowpassed speech, and a
+stationary white-noise probe with the echo at delay 512 (4 s):
+
+| solver | canonical | speechlp | d512@4s | role in the story |
+|--------|-----------|----------|---------|-------------------|
+| correlation gradient (best: β=1, δ=8) | 9.35 dB | 15.27 dB | 26.57 dB | FAIL — the windowed system's target wanders every frame |
+| error gradient (Chang-Willson CG, hybrid) | 29.78 dB | 35.46 dB | 29.65 dB | PASS — unbiased direction, matrix demoted to stride |
+| **per-bin RLS** | **44.68 dB** | **46.62 dB** | **69.20 dB** | champion — exact Newton step via a maintained inverse |
+
+Why the ladder: the three solvers give the autocorrelation matrix three
+different jobs. **Correlation** lets it *define the target* (`T·w = rcross`)
+— but `rcross` is re-estimated from noisy speech every frame and cond(T) ≈ 220
+amplifies that noise, so the target itself wanders (damping cannot fix a
+moving destination). **Error** makes the direction independent of the matrix
+(the instantaneous error gradient has *zero expectation at the true path*)
+and uses T only to size the stride. **RLS** maintains the exact inverse
+P = R⁻¹ (Sherman-Morrison, negligible at 8 taps) with a fading loading and an
+excitation gate against covariance wind-up — direction and stride both exact.
+Details: [docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md)
+and ![the four jobs](docs/autocorr_matrix_roles_en.png).
+
+Geometry stacks on top of the solver: at hop 128 (8× overlap) the same engines
+reach **RLS 55.30 dB / CG 36.92 dB** on canonical (scratch-verified; wrapper
+still at 1024/256 for benchmark continuity). Dense reverb needs coverage
+first: reverb30 (800 ms RIR) requires n_g ≥ 32, where RLS also leads
+(26.31 vs 23.85).
+
+## The two processing machines
+
+Both machines take the same signals in and produce the same residual stream;
+they differ in **what the FFT is** and therefore in how the criterion must be
+built.
+
+### Overlap-Save — the FFT is a computational tool
+
+Weights are **full frame spectra** (one 512-point filter per partition); the
+frame-wise spectral product is a *circular* convolution whose wrapped head
+must never be graded — the zero-headed **[0;e]** criterion grades only the
+fresh block, and the G projection keeps each partition's impulse response
+causal. Grading the whole frame instead causes the **criterion cliff**
+(5.94 dB vs 23.77 dB measured):
+
+![criterion cliff](docs/criterion_cliff.png)
+![overlap-save head](docs/overlap_save_head.png)
+
+### WOLA — the FFT *is* the filterbank
+
+The windowed frame FFT **is** a 513-band filterbank; each bin runs its own
+tiny complex FIR **across subband ticks** (`Ŷ_b[m] = Σ_j w_b[j]·X_b[m−j]`).
+The per-bin error is a scalar formed in the subband domain — a circular-alias
+head is *structurally impossible*, so no [0;e] and no G projection exist.
+Perfect reconstruction comes from the sqrt-Hann analysis/synthesis pair
+(q²-COLA). Note the naming trap: WOLA's synthesis overlap-add is
+*reconstruction*, not the fast-convolution OLA.
+
+![WOLA has no time folding](docs/wola_folding.png)
+
+Full comparison (isomorphism of the multiplication structures, the three
+real difference axes, oversampling conventions):
+[docs/wola_vs_overlapsave.md](docs/wola_vs_overlapsave.md) (English:
+[docs/wola_vs_overlapsave_en.md](docs/wola_vs_overlapsave_en.md)).
 
 ## Algorithms
 
-### Frequency-Domain Adaptive Filters
+| engine | file | machine | solver | note |
+|--------|------|---------|--------|------|
+| **FD_NLMS** | `FD_NLMS.py` | OLS 512/128 | instantaneous NLMS; `beta>0` = gradient averaging (the former CONJUGATE_MDF, merged bit-exact); `rho` proportionate; `preemph` in-class whitening | canonical [0;e] engine |
+| **PBFDAF-CG** | `pfdaf_cg.py` | OLS | γ-averaged error gradient + per-bin Gram + CG (k_max=1 in streaming) | fastest OLS on long signals |
+| **FB-Toeplitz** | `conjugate_fb_toeplitz.py` | WOLA 1024/256 | `solver='rls'` (champion) or `'cg'` with `gradient='error'`/`'correlation'` | the filterbank family |
 
-| Algorithm | File | Adaptation | Use Case |
-|-----------|------|------------|----------|
-| **PFADF MDF CG** | `pfadf_mdf_cg.py` | Normalized gradient | Stable + sub-partition delay resolution |
-| **FD_NLMS** | `FD_NLMS.py` (renamed from conjugate_mdf.py, 2026-10-06) | Instantaneous normalized gradient; `beta > 0` turns on gradient averaging (the former CONJUGATE_MDF algorithm, merged 2026-10-06 bit-exact), excitation gate, G-projection | The canonical engine — cliff-free at any delay |
-| **PBFDAF-CG (AES 2006)** | `pfdaf_cg.py` | Conjugate-gradient direction on the memory-averaged gradient | Fastest convergence on longer signals |
+Removed engines (measurements archived in
+`results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md` and
+`results/2026-10-06_conjugate-toeplitz/`): full-frame correlation Toeplitz
+(the 5.94 dB cliff counterexample) and the WOLA-NLMS sibling (10.66 dB; the
+NLMS baseline role is covered by FD_NLMS).
 
-All four share the same overlap-save frame contract: full-frame FFTs in,
-zero-headed `[0;e]` a-priori error out — the `[0;e]` criterion (grade only
-the new block) is what removes the delay-mod-M "criterion cliff"
-(see [DATAFLOW.md §7](docs/DATAFLOW.md)).
-
-## Architecture
-
-All algorithms use **2M-point FFTs with overlap-save** for sub-partition delay resolution.
-
-```
-Reference (x) ──→ [Loudspeaker] ──→ [Room h] ──→ [Mic] ──→ d
-       │                                                    │
-       └──→ [Adaptive Filter H] ──→ echo_est (y) ──→ (-) ←─┘
-                                          │
-                                      error (e) ──→ output
-                                          │
-                                          └──→ [Weight Update]
-```
-
-**Start here:** [docs/OVERVIEW.md](docs/OVERVIEW.md) — theory, engines, configuration, and the full results ladder.
-
-See [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) for full architecture details, and [DATAFLOW.md](DATAFLOW.md) for signal flow diagrams.
-
-## Benchmark Results
-
-### Official suite (test_subband_echo_cancellation.py, canonical 50 ms pair)
-
-| key | algorithm | ERLE | Correlation | Status |
-|-----|-----------|------|-------------|--------|
-| `nlms` | time-domain NLMS | 22.27 dB | 0.997 | PASS |
-| `fdnlms` | FD_NLMS (`[0;e]` + G), FFT 512 / hop 128 | 23.77 dB | 0.998 | PASS |
-| `cgmdf` | FD_NLMS with β-gradient-averaging (β=0 ≡ fdnlms; β=0.3 → 24.47 dB via run_fdnlms) | 23.77 dB | 0.998 | PASS |
-| `pfcg` | PBFDAF-CG (AES 2006, γ=0.4) | 26.11 dB | 0.999 | PASS |
-| `fbtoe` | **WOLA FB-Toeplitz, per-bin RLS** (conjugate_fb_toeplitz, nfft 1024 / hop 256) | **44.68 dB** | **1.0000** | PASS |
-
-(The `wola` per-bin-NLMS sibling — 10.66 dB FAIL — was removed 2026-10-06:
-the NLMS baseline role is covered by `fdnlms`. Its measurement is archived in
-results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md.)
-
-The 4×-oversampled WOLA filterbank family (added 2026-10-06) is documented in
-[docs/wola_vs_overlapsave.md](docs/wola_vs_overlapsave.md) and
-[docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md); its
-experiment log is `results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md`.
-
-### PBFDAF-CG vs FD_NLMS across pairs (γ=0.4, Hestenes-Stiefel)
+PBFDAF-CG vs FD_NLMS across pairs (γ=0.4, Hestenes-Stiefel) — the CG advantage
+**grows with signal length**:
 
 | pair | PBFDAF-CG | FD_NLMS | Δ |
 |------|-----------|---------|---|
 | canonical (5 s) | 26.11 dB | 23.77 dB | +2.3 |
 | noise + lowpass (5 s) | 48.06 dB | 43.20 dB | +4.9 |
 | speech + lowpass (30 s) | 31.44 dB | 21.67 dB | **+9.8** |
-| canonical tiled ×4 (20 s) | 27.63 dB | 17.69 dB | **+9.9** |
 
-The CG advantage **grows with signal length** — the averaged-gradient +
-conjugate-direction machinery keeps adapting where plain NLMS stalls
-(the paper's faster-convergence claim, confirmed). β-method ranking:
-Hestenes-Stiefel ≥ Dai-Yuan > Polak-Ribière ≫ Fletcher-Reeves (FR
-diverges on speech — norm-only β cannot sense the changing quadratic).
-Details: `results/2026-10-05_pfdaf-cg/FINDINGS.md`.
+## Test data and the ground truth
 
-### Known limits
+All test pairs are synthetic by construction — the echo path h is built
+explicitly and `mic = conv(ref, h)`, so every run can verify the engine
+**learned the physics**, not just got quiet:
 
-- **Dense reverb**: coverage first (N_G must exceed the direct delay),
-  then per-bin FD convergence is slow — full-tap time-domain NLMS is
-  the workhorse there (`results/2026-10-01_hop-ablation/`).
-- **CG iterations**: k_max > 1 diverges on the per-bin model; keep 1.
+- reference choice: LibriSpeech speech (canonical — colored, realistic),
+  white noise (the conditioning-friendly ceiling oracle), 30 s variants
+  (the data-quantity axis), three documented rooms;
+- echo tiers: single delayed tap (0.4 @ 50 ms) → Butterworth-lowpassed tap →
+  a three-part synthetic room RIR (direct path + 8 early reflections +
+  lowpass-colored RT60 tail + secondary reflections; scenarios office /
+  conference / huddle, seeds 42/123/456, normalized to a passive room:
+  energy ≤ 1 and |H(f)| ≤ 1);
+- success = ERLE ≥ 15 dB **and** echo-estimate correlation ≥ 0.9 **and** the
+  learned path matching the ground truth (NMSE < −20 dB, peak position and
+  amplitude). Example: canonical true `0.40 @ 800` vs learned
+  `0.3941 @ delay 800`.
 
-### Historical (early development, superseded)
-
-<details>
-<summary>PFADF MDF CG first runs, identity test, early fair comparison</summary>
-
-| Metric | Value | Threshold | Status |
-|--------|-------|-----------|--------|
-| ERLE | 7.18 dB | >15 dB | ⚠ Limited by signal length |
-| Correlation | **0.978** | >0.9 | ✓ Pass |
-| Delay error | **0 samples** | — | ✓ Perfect |
-| NMSE | -13.66 dB | <-20 dB | ⚠ Needs more blocks |
-
-Identity test (white noise, d=x, mu=0.5): ERLE 23.77 dB, signal-proportional
-ε ERLE ~70 dB. Early fair comparison (CG-MDF 3.21 dB vs PFADF 0.59 dB) —
-both since superseded by the canonical rewrite.
-
-</details>
-
-## Requirements
-
-- Python 3.12 (project venv: `.venv`)
-- numpy, scipy, soundfile, matplotlib, librosa, tqdm
+Full details: [docs/OVERVIEW.md §6](docs/OVERVIEW.md#6-test-data-reference-choice-echo-reverb-and-the-ground-truth).
 
 ## Usage
 
-### Official test suite (all algorithms, one command each)
-
 ```bash
-.venv/Scripts/python test_subband_echo_cancellation.py fbtoe   # or nlms | fdnlms | cgmdf | pfcg
+.venv/Scripts/python test_subband_echo_cancellation.py fbtoe   # champion
+.venv/Scripts/python test_subband_echo_cancellation.py fdnlms  # OLS baseline (nlms | cgmdf | pfcg too)
+.venv/Scripts/python run_fdnlms.py canonical --algo cgmdf --beta 0.3
+.venv/Scripts/python run_fdnlms.py speechlp --algo fdnlms --preemph 0.95
+.venv/Scripts/python run_fdnlms.py reverb30 --algo pfcg --delta 6
+# pairs: canonical | noise | speechlp | reverb_conference | reverb30 ; --delay D = synthetic pure delay
 ```
 
-### Parameterized A/B driver
-
-```bash
-.venv/Scripts/python run_fdnlms.py canonical --algo pfcg --gamma 0.4 --beta-method hestenes-stiefel
-.venv/Scripts/python run_fdnlms.py speechlp --algo fdnlms --per-second
-# pairs: canonical | noise | speechlp | reverb_conference ; --delay D for synthetic pure delays
-```
-
-### Python API
+Python API (any engine obeys the same frame contract):
 
 ```python
 from FD_NLMS import FD_NLMS
 from pfdaf_cg import PFDAF_CG
-import numpy as np
-import soundfile as sf
+import numpy as np, soundfile as sf
 
-ref, sr = sf.read('audio/reference.wav')   # Far-end (loudspeaker)
-mic, _  = sf.read('audio/microphone.wav')  # Near-end (mic with echo)
-
+ref, sr = sf.read('audio/reference.wav')
+mic, _  = sf.read('audio/microphone.wav')
 FFT, HOP = 512, 128
 f = PFDAF_CG(NCHAN=1, NBIN=FFT // 2 + 1, N_G=8, hop=HOP, gamma=0.4)
 out = np.zeros(len(ref))
@@ -137,79 +161,89 @@ for i in range((len(ref) - FFT) // HOP):
     E = f.apply(np.fft.rfft(mic[s:s+FFT]).reshape(-1, 1),
                 np.fft.rfft(ref[s:s+FFT]).reshape(-1, 1))
     out[s+FFT-HOP:s+FFT] = np.fft.irfft(E[:, 0], n=FFT)[FFT-HOP:]
-
-sf.write('output.wav', out, sr)
 ```
 
-## Test Harness
+## Harness
 
-The project includes a structured test harness with **two-level verification**:
-
-| Layer | What it measures | Metrics |
-|-------|-----------------|---------|
-| **Signal-level** | Did the filter cancel echo? | ERLE (dB) |
-| **Model-level** | Did the filter learn the true echo path? | NMSE, correlation, coherence, delay error, amplitude error |
-
-### Harness Structure
+Two-level verification — signal-level (did it cancel?) and model-level (did
+it learn the true path?): NMSE, correlation, coherence, delay error,
+amplitude error.
 
 ```
 harness/
-├── core/
-│   ├── interfaces.py    # AdaptiveFilter ABC (filt/update/get_echo_path)
-│   ├── runner.py        # run_test(), TestConfig, TestResult
-│   └── report.py        # TestReport, ComparisonReport
-├── metrics/
-│   └── comparison.py    # ERLE, NMSE, correlation, coherence, echo path metrics
-└── adapters/
-    └── __init__.py      # Algorithm adapters for harness interface
+├── core/       interfaces.py (AdaptiveFilter ABC), runner.py (run_test/TestConfig), report.py
+├── metrics/    comparison.py (ERLE/corr/echo-path), spectrum.py (band ERLE, spectrograms)
+└── adapters/   frame-contract adapters (CGMDFAdapter = FD_NLMS β, FDNLMSAdapter)
 ```
 
-See [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) for the full methodology.
+Generators: `wav_files_scripts/echo_path_generator.py` (room model) +
+`harness_template/ground_truth/generators.py` (room wrappers, driven by
+`create_test_files.py` / `create_noise_echo.py` / `create_reverb_signals.py`).
+Methodology: [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) and
+[docs/OVERVIEW.md §6–7](docs/OVERVIEW.md).
 
-## Documentation
+## Documentation index
 
-- [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) — Algorithm family tree, design decisions, common pitfalls
-- [DATAFLOW.md](DATAFLOW.md) — Visual signal flow diagrams, buffer structures, algorithm internals
-- [RLS_DEBUG_PROCESS.md](docs/RLS_DEBUG_PROCESS.md) — Complete Conjugate Gradient MDF debug journey (5 phases, 10+ bugs fixed)
-- [REGULARIZATION_RESEARCH.md](REGULARIZATION_RESEARCH.md) — Deep dive on regularization factor ε (theory, literature, experiments)
-- [ECHO_PATH_COMPARISON.md](ECHO_PATH_COMPARISON.md) — Echo path comparison methodology and metrics
-- [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) — 5-layer harness framework for AI-assisted algorithm development
+| doc | content |
+|-----|---------|
+| [docs/OVERVIEW.md](docs/OVERVIEW.md) | **front door** — theory, two machines, scoreboard, tangled questions, test data, harness, config |
+| [docs/wola_vs_overlapsave.md](docs/wola_vs_overlapsave.md) / [EN](docs/wola_vs_overlapsave_en.md) | the two machines in depth (the naming traps, the three real difference axes, [0;e]'s family split) |
+| [docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md) / [EN](docs/autocorr_matrix_methods_en.md) | the autocorrelation matrix's four jobs (correlation / error / PFCG / RLS) + update rules side by side |
+| [docs/fold_and_oversampling_notes.md](docs/fold_and_oversampling_notes.md) / [EN](docs/fold_and_oversampling_notes_en.md) | the reference rig's fold (polyphase) trick; three kinds of "folding" disambiguated; oversampling conventions |
+| [DATAFLOW.md](docs/DATAFLOW.md) | signal-flow diagrams, buffer structures, the criterion cliff geometry (§7), benchmarks (§10), the WOLA family (§11) |
+| [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) | family tree, design decisions |
+| [docs/RLS_DEBUG_PROCESS.md](docs/RLS_DEBUG_PROCESS.md) | the original MDF debug chronicle (5 phases) |
+| [TODO.md](TODO.md) | current roadmap — done cycles, bottlenecks, ranked next steps |
 
-### Test Scripts
+Figures (generated locally; `*.png` is gitignored): criterion cliff
+(`docs/criterion_cliff.png`, `docs/cliff_geometry.png`), overlap-save head
+(`docs/overlap_save_head*.png`), WOLA folding proof (`docs/wola_folding.png`),
+fold trick (`docs/fold_trick.png`), the four matrix jobs
+(`docs/autocorr_matrix_roles_en.png`), window placement and gate geometry
+(`docs/window_placement.png`, `docs/gate_dense_matrix.png`).
 
-| Script | Purpose |
-|--------|---------|
-| `test_subband_echo_cancellation.py` | Official suite — keys `nlms` / `fdnlms` / `cgmdf` / `pfcg` / `fbtoe` |
-| `run_fdnlms.py` | Parameterized CLI driver (pair, algo, γ/β/k_max knobs, per-second ERLE) |
-| `test_echo_path_comparison.py` | Echo path estimation verification (shared harness) |
-| `visualize_weight_convergence.py` | Weight convergence visualization suite |
-| `create_test_files.py` | Generate the canonical test pair (50 ms delay, 0.4 gain) |
-| `create_noise_echo.py` | Parameterized noise+lowpass echo generator |
+## Key design decisions
 
-## Key Design Decisions
+1. **Grade only what you emit.** On OLS that is the [0;e] zero-headed error
+   (the circular head cannot serve sub-hop delays — grading it is the
+   criterion cliff). On WOLA the per-bin scalar error is formed in the
+   subband domain, so the headless property is structural, not a rule.
+2. **The gradient must be unbiased; the matrix may only size the stride.**
+   Directions derived from windowed statistics (correlation mode) chase a
+   target that wanders with the estimation noise — measured catastrophic on
+   speech. The instantaneous error gradient has zero expectation at the true
+   path; the autocorrelation matrix then only shapes the step (or, in RLS, is
+   maintained as an exact inverse).
+3. **Excitation gate, not a level threshold** — adapt only while
+   P_ref > gate_rel·P_mic and above a running-peak floor; a level detector
+   cannot separate quiet speech from a reverb pause. For RLS the gate is the
+   covariance wind-up guard, not an option.
+4. **Two-level verification** — signal-level ERLE and model-level echo-path
+   metrics catch different failure classes; the ground-truth path is part of
+   the pass criteria.
+5. **Coverage before speed on reverb** — N_G (OLS) or n_g·hop (WOLA) must
+   exceed the path length first; then the solver decides how deep it gets.
 
-1. **`[0;e]` criterion (grade only the new block)**: the overlap-save head
-   cannot serve non-hop-aligned delays — grading it causes the criterion
-   cliff (~10 dB ceiling at sub-hop delays). All current engines use the
-   zero-headed error; see DATAFLOW §7 for the geometry and the ablation.
-2. **Overlap-save tail-keep, no windows**: raw frames beat WOLA/windowed
-   variants on every test pair (taper tax: −1.2 dB speech, −25 dB flat
-   spectra, μ=1 instability on colored speech).
-3. **Excitation gate, not level threshold**: adapt only while
-   P_ref > gate_rel·P_mic (ratio) AND above a running-peak floor — a pure
-   level detector cannot separate quiet speech from a reverb pause.
-4. **Two-level verification**: signal-level ERLE and model-level echo path
-   metrics catch different classes of bugs.
+## Requirements
+
+- Python 3.12 (project venv: `.venv`)
+- numpy, scipy, soundfile, matplotlib, librosa, tqdm
 
 ## References
 
-- García Morales, L., Beracoechea, J.A., Torres-Guijarro, S., Casajús-Quirós, F.J. (2006). "Conjugate Gradient Techniques for Multichannel Acoustic Echo Cancellation in Frequency Domain." AES 120th Convention, Paper 6713.
-- Boray, G., Srinath, M.D. (1992). "Conjugate Gradient Techniques for Adaptive Filtering." IEEE Trans. CAS-I 39(1).
-- Lee, K.-A., Gan, W.-S., Kuo, S.M. "Subband Adaptive Filtering: Theory and Implementation."
-- Ferrara, E.R. (1980). "Fast Implementations of LMS Adaptive Filters." IEEE Trans. ASSP.
-- Mansour, D., Gray, A.H. (1982). "Unconstrained Frequency-Domain Adaptive Filter." IEEE Trans. ASSP.
-- Sayed, A.H. (2003). "Fundamentals of Adaptive Filtering." Wiley.
-- Haykin, S. "Adaptive Filter Theory."
+- García Morales, L., et al. (2006). "Conjugate Gradient Techniques for
+  Multichannel Acoustic Echo Cancellation in Frequency Domain." AES 120th,
+  Paper 6713. (PFCG)
+- Chang, K.-H., Willson, A.N. (2000). "Analysis of Conjugate Gradient
+  Algorithms for Adaptive Filtering." IEEE Trans. SP. (the FB-Toeplitz CG
+  solver's lineage)
+- PAES/Eneman et al. — PBFDAF error-gradient averaging (the φ update).
+- Haykin, S. "Adaptive Filter Theory." ch. 9 (RLS).
+- Paleologu, C., Benesty, J. et al. — VFF-RLS for tracking (roadmap).
+- Crochiere & Rabiner (1983), *Multirate Digital Signal Processing* (WOLA /
+  polyphase); Allen & Rabiner (1977) STFT.
+- Ferrara (1980) FDAF; Mansour & Gray (1982) unconstrained FDAF; Soo & Pang
+  (1990) MDF; Shynk (1992) survey.
 
 ## Author
 
