@@ -31,6 +31,7 @@ selected by two constructor switches, `solver='rls'|'cg'` and (within CG)
 | `fbtoe` (solver=`'rls'`) | **FB-Toeplitz per-bin RLS** — official wrapper config | WOLA 1024/256 | **44.68 dB** | **1.0000** | PASS |
 | — (solver=`'cg'`, gradient=`'error'`) | FB-Toeplitz CG error-hybrid | WOLA 1024/256 | 29.78 dB | 0.9995 | PASS (scratch) |
 | — (solver=`'cg'`, gradient=`'correlation'`) | FB-Toeplitz CG correlation | WOLA 1024/256 | 9.35 dB best | — | FAIL (scratch; class default = teaching counterexample) |
+| — (`run_fdnlms --algo lalos`) | **FD_CG_WIENER** — Lalos-Berberidis 2006 port: single-block CG on the Wiener normal equations (correlation family, zero-head statistics) | OLS 2048/1024, filter = ONE hop | 15.53 dB (noise 31.78, speechlp 22.29) | 0.987 | PASS (scratch; no cliff — sub-grid delays 34–53 dB) |
 
 ### The WOLA family: three solvers, one filterbank
 
@@ -121,6 +122,51 @@ form is innocent (‖R−T‖/‖R‖ = 0.37%, frozen T-solve = 45.4 dB ≈ RLS 
 Details and the four update rules side by side:
 [docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md) and
 ![the four jobs](docs/autocorr_matrix_roles_en.png).
+
+### The partitioned-Toeplitz trap: single block exact, multi-partition per-bin approximate
+
+Why did the legacy multi-partition engine cliff while the *same*
+CG-on-normal-equations machinery works inside the WOLA family above — and
+why does the new single-block `FD_CG_WIENER` work on plain overlap-save?
+The answer is a **basis fact, not a solver fact**:
+
+- **Single block (M taps, 2M FFT) — zero approximation.** The 2M circulant
+  embedding of the M-tap normal matrix is exactly diagonalized by the 2M-DFT,
+  so one CG step per block on `T·w = rcross` solves the true windowed system.
+  This is Lalos & Berberidis (EUSIPCO 2006); our port
+  (`run_fdnlms.py --algo lalos`) passes every sub-grid delay probe
+  (1/77/141/255 samples → 34–53 dB, **no cliff**; identity probe −306.9 dB;
+  delay-800 synthetic learns peak 0.9996 @ 800). Price: the filter is ONE
+  hop, so an M-tap path needs an M-sample hop (latency 2M) — no partitions.
+- **Multi-partition per-bin — decoupling is an EXTRA approximation.** The
+  true second-order operator is the L×L time-domain Toeplitz; splitting the
+  regressor into partitions and keeping one scalar per (bin, lag) assumes
+  E[X*(k,p)·X(k',p')] = 0 for k ≠ k', which holds **only for white
+  (δ-correlated) excitation**. Measured off-block energy
+  (`scratch_criterion_identity.py`): white 0.302% @300 frames → 0.031%
+  @3000 (statistical fluctuation — heals with data); colored speech
+  9.9% → 10.8% (deterministic Dirichlet leakage — the correlation tail
+  crosses the hop boundary so different partitions' DFT windows see each
+  other — **never heals**). An exact line search on this block-diagonal
+  model converges to the *model's* optimum, which is uphill on the true
+  objective. The failure concentrates at weak high bins: under color the
+  per-bin block norms decay steeply with bin index, so the RELATIVE
+  cross-bin leakage → 1 exactly where the model is most wrong.
+- **The two legal escapes:** make the basis diagonalize the operator — a
+  **filterbank** (the WOLA family: per-bin there is a construction fact,
+  and the within-bin Toeplitz projection is innocent at 0.37%) — or stay
+  **single-block** (`FD_CG_WIENER`). What dies is precisely
+  "raw hop-DFT per-bin basis × time-domain criterion under colored
+  excitation" — the legacy engine's second approximation, stacked on top
+  of its circular-convention criterion.
+
+![three bases, one operator](docs/multipartition_basis.png)
+![bin leakage mechanism](docs/bin_leakage_mechanism.png)
+![projected-model mismatch](docs/perbin_model_mismatch.png)
+
+Full development: [docs/criterion_toeplitz_layers.md](docs/criterion_toeplitz_layers.md)
+(§11 Q3 single-block vs multi-partition, §12 the three grades of shift
+invariance, §13 the paper genealogy, §14 the figure walk-through).
 
 ### Geometry: hop and nfft are first-order knobs
 
@@ -265,6 +311,7 @@ rig principle: ![rig buffer + fold](docs/osfb_analysis_buffer.png).
 | **FB-Toeplitz RLS** ★ | `conjugate_fb_toeplitz.py` | `CONJUGATE_FB_TOEPLITZ(solver='rls', delta=0.1, lam=0.999)` | **champion 44.68** — per-bin exact Newton; gate = anti-wind-up (mandatory) |
 | **FB-Toeplitz CG error** | `conjugate_fb_toeplitz.py` | `CONJUGATE_FB_TOEPLITZ(solver='cg', gradient='error', delta=1.0, gamma=0.1)` | 29.78 — unbiased direction, T sizes the stride only |
 | **FB-Toeplitz CG correlation** | `conjugate_fb_toeplitz.py` | `CONJUGATE_FB_TOEPLITZ(solver='cg', gradient='correlation', beta=1.0, delta=8)` | ≤ 9.35 — solves the windowed system; target wanders on speech. **The bare constructor's DEFAULT — pass solver/gradient explicitly** |
+| **FD_CG_WIENER** (`lalos`) | `FD_NLMS.py` | `run_fdnlms.py --algo lalos` (`--lam 0.99999` = ~6 s memory window, `--reset-period 32`, `--hop 1024`) | faithful Lalos-Berberidis 2006 port — single-block FD CG on the Wiener normal equations with exact zero-head linear statistics; one CG step + guarded exact line search per block; no cliff, no partitions (filter = one hop, nfft = 2·hop) |
 
 The three FB-Toeplitz variants share one class: the WOLA front end (analysis
 window → subband shift register → per-bin scalar error → synthesis OLA) and
@@ -275,7 +322,9 @@ three update rules side by side).
 Removed engines (measurements archived in
 `results/2026-10-06_conjugate-fb-toeplitz/FINDINGS.md` and
 `results/2026-10-06_conjugate-toeplitz/`): full-frame correlation Toeplitz
-(the 5.94 dB cliff counterexample) and the WOLA-NLMS sibling (10.66 dB; the
+(the 5.94 dB cliff counterexample — doubly approximate: the
+circular-convention criterion AND the multi-partition per-bin basis, see
+the partitioned-Toeplitz trap above) and the WOLA-NLMS sibling (10.66 dB; the
 NLMS baseline role is covered by FD_NLMS).
 
 PBFDAF-CG vs FD_NLMS across pairs (γ=0.4, Hestenes-Stiefel) — the CG advantage
@@ -361,7 +410,9 @@ diagrams).
 .venv/Scripts/python run_fdnlms.py canonical --algo cgmdf --beta 0.3
 .venv/Scripts/python run_fdnlms.py speechlp --algo fdnlms --preemph 0.95
 .venv/Scripts/python run_fdnlms.py reverb30 --algo pfcg --delta 6
+.venv/Scripts/python run_fdnlms.py canonical --algo lalos   # FD_CG_WIENER (Lalos 2006)
 # pairs: canonical | noise | speechlp | reverb_conference | reverb30 ; --delay D = synthetic pure delay
+# lalos: --hop must cover the path (filter = one hop, nfft = 2*hop); --lam = memory window
 ```
 
 Python API (any engine obeys the same frame contract):
@@ -447,6 +498,13 @@ the projected-model mismatch sketch (`docs/perbin_model_mismatch.png`).
    the pass criteria.
 5. **Coverage before speed on reverb** — N_G (OLS) or n_g·hop (WOLA) must
    exceed the path length first; then the solver decides how deep it gets.
+6. **The second-order basis must diagonalize the operator.** The time-domain
+   normal matrix is Toeplitz; single-block overlap-save diagonalizes it
+   exactly via the 2M circulant embedding (FD_CG_WIENER), a filterbank makes
+   per-bin decoupling a construction fact (FB-Toeplitz) — but raw hop-DFT
+   multi-partition per-bin decoupling is only white-excitation-true
+   (~10% colored off-block leakage that never heals). CG machinery is never
+   the problem; the basis it is handed is (see the partitioned-Toeplitz trap).
 
 ## Requirements
 
@@ -461,6 +519,10 @@ the projected-model mismatch sketch (`docs/perbin_model_mismatch.png`).
 - Chang, K.-H., Willson, A.N. (2000). "Analysis of Conjugate Gradient
   Algorithms for Adaptive Filtering." IEEE Trans. SP. (the FB-Toeplitz CG
   solver's lineage)
+- Lalos, A.S., Berberidis, K. (2006). "A Frequency Domain Conjugate Gradient
+  Algorithm and its Application to Channel Equalization." EUSIPCO.
+  (FD_CG_WIENER — Chang-Willson Table I ported to single-block overlap-save;
+  the zero-head statistics discipline)
 - PAES/Eneman et al. — PBFDAF error-gradient averaging (the φ update).
 - Haykin, S. "Adaptive Filter Theory." ch. 9 (RLS).
 - Paleologu, C., Benesty, J. et al. — VFF-RLS for tracking (roadmap).
