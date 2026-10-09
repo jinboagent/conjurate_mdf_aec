@@ -273,3 +273,164 @@ class FD_NLMS:
             E_out[self.nfft - self.hop:] = e_time
         self.output = np.fft.rfft(E_out, axis=0)
         return self.output
+
+
+class FD_CG_WIENER:
+    """
+    Frequency-domain conjugate gradient on the Wiener normal equations —
+    a faithful port of Lalos & Berberidis, "A Frequency Domain Conjugate
+    Gradient Algorithm and its Application to Channel Equalization",
+    EUSIPCO 2006 (aec/freqgradientconjugate.pdf). The correlation-family
+    sibling of PAES/pfcg: the update never sees the residual e; it drives
+    the normal-equation residual g = b - Rw to zero (paper eqs 7/14).
+
+    The statistics are EXACT linear correlations computed the paper's way
+    (eqs 15-19): zero-head block spectra X = F[0; lam-weighted current
+    block], full frame V = F[history; current]; irfft(conj(V)*X)[:M] —
+    the circular wrap lands in the ZERO head, so nothing contaminated
+    enters (the "x don't care" half is discarded). The fixed point is
+    therefore the LINEAR Wiener solution, not the full-frame circular
+    pseudo-solution of the deleted legacy engine
+    (docs/criterion_toeplitz_layers.md §13).
+
+    Single-block geometry (the paper's own): the filter is ONE hop
+    (M taps, nfft = 2*hop); long paths need a correspondingly large hop
+    (latency 2*hop). A multi-partition per-bin extension is deliberately
+    NOT provided: under colored excitation the hop-DFT partition basis
+    leaks ~10% cross-bin energy and the per-bin solve degrades
+    (docs/criterion_toeplitz_layers.md §12/§14).
+
+    One CG step per block, exact line search on the Toeplitz model, the
+    model's eigenvalues maintained by the paper's recursion (eq 20):
+
+        r_g(m) = sum_i lam^i x(kM-i) x(kM-i-m)       exact linear corr
+        b_g(m) = sum_i lam^i u(kM-i) x(kM-i-m)
+        c_T    = [r_g; 0; r_g[M-1..1]]               2M circulant column
+        D_R   <- lam^M * D_R + FFT(c_T)              (eq 20)
+        g'     = lam^M * g + b_g - T(r_g) w          (eq 14 carry)
+        Rp     = irfft(D_R * FFT([p; 0]))[:M]
+        alpha  = 0.999 * <p, g'> / <p, Rp>           (guarded exact
+                                                      line search)
+        w     <- w + alpha * p ;  g <- g' - alpha * Rp
+        p     <- g + beta * p                        (Polak-Ribiere+,
+                                                      periodic reset)
+
+    No excitation gate, no constraint projection, no residual in the
+    update — all three are [0;e]-family machinery this engine by design
+    does not use (the lam window handles pauses by forgetting).
+    """
+
+    __slots__ = ['nchan', 'nbin', 'N_G', 'Nrxref', 'hop', 'nfft', 'M2',
+                 'lam', 'lamM', 'reset_period', 'alpha_guard',
+                 'w', 'g', 'p', 'D_R', '_n', 'output', 'e']
+
+    def __init__(self, NCHAN, NBIN, N_G, hop, lam=0.99999,
+                 reset_period=32, alpha_guard=1e-30, Nrxref=1):
+        self.nchan = NCHAN
+        self.nbin = NBIN
+        self.nfft = 2 * (NBIN - 1)
+        self.hop = int(hop)
+        if int(N_G) != 1:
+            raise ValueError("FD_CG_WIENER is the paper's single-block "
+                             "engine: N_G must be 1 (filter = one hop; "
+                             "use a larger hop for longer paths)")
+        if int(Nrxref) != 1:
+            raise ValueError("single reference channel only (paper is "
+                             "single-input)")
+        if self.hop * 2 != self.nfft:
+            raise ValueError("FD_CG_WIENER needs nfft = 2*hop "
+                             f"(got hop={self.hop}, nfft={self.nfft})")
+        self.N_G = 1
+        self.Nrxref = 1
+        self.lam = float(lam)
+        self.lamM = self.lam ** self.hop        # per-block forgetting
+        self.reset_period = max(1, int(reset_period))
+        self.alpha_guard = float(alpha_guard)
+        self.reset()
+
+    def reset(self):
+        M = self.hop
+        self.w = np.zeros((M, self.nchan))      # time-domain taps
+        self.g = np.zeros((M, self.nchan))      # normal-eq residual
+        self.p = np.zeros((M, self.nchan))      # CG direction
+        self.D_R = np.zeros(self.nbin, dtype=complex)   # model eigenvalues
+        self._n = 0
+        self.output = np.zeros((self.nbin, self.nchan), dtype=complex)
+        self.e = np.zeros(self.hop)
+
+    def _emb(self, vec):
+        """2M spectrum of the zero-padded embedding [vec; 0]."""
+        buf = np.zeros(self.nfft)
+        buf[:self.hop] = vec
+        return np.fft.rfft(buf)
+
+    def _matvec(self, D, vec):
+        """Circulant-embedding matvec, valid (unwrapped) first half."""
+        return np.fft.irfft(D * self._emb(vec), n=self.nfft)[:self.hop]
+
+    def apply(self, Y, Y_rx):
+        """
+        Process one frame. Y [NBIN, NCHAN] mic spectrum, Y_rx [NBIN, 1]
+        reference spectrum (both FULL 2*hop-frame FFTs, i.e. the paper's
+        V(k) = F[history; current]). Returns the zero-headed a priori
+        error spectrum rfft([0; e]) — same frame geometry as FD_NLMS.
+        """
+        M, n2 = self.hop, self.nfft
+        V = Y_rx[:, 0]
+        Vc = np.conj(V)
+        xf = np.fft.irfft(V, n=n2)
+        td = np.fft.irfft(Y, n=n2, axis=0)      # mic frame [n2, nchan]
+
+        # zero-head, lam-weighted current-block spectra (paper eqs 15-16);
+        # weights: oldest sample lam^(M-1) ... newest lam^0
+        wl = self.lam ** np.arange(M - 1, -1, -1)
+        zh = np.zeros(n2)
+        zh[M:] = xf[M:] * wl
+        X_zh = np.fft.rfft(zh)
+        r_g = np.fft.irfft(Vc * X_zh, n=n2)[:M]          # exact linear corr
+        cT = np.concatenate([r_g, [0.0], r_g[:0:-1]])    # 2M circulant col
+        DT = np.fft.rfft(cT)
+        self.D_R = self.lamM * self.D_R + DT             # eq 20
+
+        # a priori output (uses w before this block's update): the valid
+        # (unwrapped) linear convolution of the frame with w is the TAIL
+        # half of irfft(V * FFT([w; 0]))
+        e_tail = np.empty((M, self.nchan))
+        for ch in range(self.nchan):
+            yfull = np.fft.irfft(V * self._emb(self.w[:, ch]), n=n2)
+            e_tail[:, ch] = td[M:, ch] - yfull[M:]
+
+        # one CG step per channel (shared statistics)
+        do_reset = (self._n % self.reset_period) == 0
+        for ch in range(self.nchan):
+            zhd = np.zeros(n2)
+            zhd[M:] = td[M:, ch] * wl
+            b_g = np.fft.irfft(Vc * np.fft.rfft(zhd), n=n2)[:M]
+            g_prime = self.lamM * self.g[:, ch] + b_g \
+                - self._matvec(DT, self.w[:, ch])
+            p = g_prime.copy() if do_reset else self.p[:, ch].copy()
+            Rp = self._matvec(self.D_R, p)
+            num = float(p @ g_prime)
+            den = float(p @ Rp)
+            if num > 0.0 and den > self.alpha_guard:
+                alpha = 0.999 * num / den
+                self.w[:, ch] = self.w[:, ch] + alpha * p
+                g_new = g_prime - alpha * Rp
+            else:
+                g_new = g_prime
+            gg = float(g_new @ g_new)
+            if gg > 1e-30:
+                beta = float((g_new - self.g[:, ch]) @ g_new) / gg
+                beta = max(0.0, beta)          # Polak-Ribiere+ clip
+            else:
+                beta = 0.0
+            self.p[:, ch] = g_new + beta * p
+            self.g[:, ch] = g_new
+        self._n += 1
+
+        # output: zero-headed a priori error (interface parity with FD_NLMS)
+        self.e = e_tail[:, 0] if self.nchan == 1 else e_tail
+        E_out = np.zeros((n2, self.nchan))
+        E_out[M:] = e_tail
+        self.output = np.fft.rfft(E_out, axis=0)
+        return self.output

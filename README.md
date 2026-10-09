@@ -409,6 +409,7 @@ Methodology: [HARNESS_ENGINEERING.md](HARNESS_ENGINEERING.md) and
 | [docs/OVERVIEW.md](docs/OVERVIEW.md) | **front door** — theory, two machines, scoreboard, tangled questions, test data, harness, config |
 | [docs/wola_vs_overlapsave.md](docs/wola_vs_overlapsave.md) / [EN](docs/wola_vs_overlapsave_en.md) | the two machines in depth (the naming traps, the three real difference axes, [0;e]'s family split) |
 | [docs/autocorr_matrix_methods.md](docs/autocorr_matrix_methods.md) / [EN](docs/autocorr_matrix_methods_en.md) | the autocorrelation matrix's four jobs (correlation / error / PFCG / RLS) + update rules side by side |
+| [docs/criterion_toeplitz_layers.md](docs/criterion_toeplitz_layers.md) | the careful walk-through: why Toeplitz binds to the full-frame criterion (not to overlap-save), the cliff's identity (bias = H⁻¹Cᴴ·wrap), PFCG's innocence, fixed-point demo reading guide, paper genealogy (Lalos vs PAES vs Chang-Willson Table I), the three grades of shift invariance, illustrated single-block vs multi-partition analysis (§14) |
 | [docs/fold_and_oversampling_notes.md](docs/fold_and_oversampling_notes.md) / [EN](docs/fold_and_oversampling_notes_en.md) | the reference rig's fold (polyphase) trick; three kinds of "folding" disambiguated; oversampling conventions |
 | [DATAFLOW.md](docs/DATAFLOW.md) | signal-flow diagrams, buffer structures, the criterion cliff geometry (§7), benchmarks (§10), the WOLA family (§11) |
 | [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) | family tree, design decisions |
@@ -420,7 +421,10 @@ Figures (generated locally; `*.png` is gitignored): criterion cliff
 (`docs/overlap_save_head*.png`), WOLA folding proof (`docs/wola_folding.png`),
 fold trick (`docs/fold_trick.png`), the four matrix jobs
 (`docs/autocorr_matrix_roles_en.png`), window placement and gate geometry
-(`docs/window_placement.png`, `docs/gate_dense_matrix.png`).
+(`docs/window_placement.png`, `docs/gate_dense_matrix.png`), the
+one-operator-three-bases comparison (`docs/multipartition_basis.png`),
+bin-leakage mechanism and healing (`docs/bin_leakage_mechanism.png`), and
+the projected-model mismatch sketch (`docs/perbin_model_mismatch.png`).
 
 ## Key design decisions
 
